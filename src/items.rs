@@ -32,6 +32,7 @@ pub enum Item {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemError {
+    #[cfg(test)]
     EmptyQuery,
     InvalidUrl,
 }
@@ -54,6 +55,8 @@ impl Item {
         }
     }
 
+    /// 테스트용 생성 도우미 (앱에서는 입력 창이 값을 검사한 뒤 `app::item_from_input`으로 만든다)
+    #[cfg(test)]
     pub fn youtube(query: &str, name: &str) -> Result<Item, ItemError> {
         let query = query.trim();
         if query.is_empty() {
@@ -62,7 +65,7 @@ impl Item {
         Ok(Item::Youtube { id: new_id(), query: query.to_string(), name: name.trim().to_string() })
     }
 
-    #[allow(dead_code)] // 4단계(웹 주소 항목 추가)에서 사용
+    #[cfg(test)]
     pub fn web(url: &str, name: &str) -> Result<Item, ItemError> {
         Ok(Item::Web { id: new_id(), url: normalize_url(url)?, name: name.trim().to_string() })
     }

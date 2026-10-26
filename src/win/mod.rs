@@ -7,6 +7,5 @@ pub mod menu;
 pub mod msg_window;
 pub mod reg;
 pub mod shell;
-#[allow(dead_code)] // 앱·웹 항목 연결(Task 4)에서 지운다
 pub mod shell_items;
 pub mod windows;

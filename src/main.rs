@@ -2,12 +2,10 @@
 //! YT Launcher 진입점.
 
 mod app;
-#[allow(dead_code)] // 앱·웹 항목 연결(Task 4)에서 지운다
 mod apps;
 mod autostart;
 mod chrome;
 mod config;
-#[allow(dead_code)] // 앱·웹 항목 연결(Task 4)에서 지운다
 mod icons;
 mod items;
 mod logging;
@@ -19,6 +17,12 @@ mod win;
 use win::instance::{MESSAGE_CLASS, MUTEX_NAME, acquire_mutex, notify_existing};
 
 fn main() {
+    // 아이콘 만들기 전용 하위 프로세스: 셸 아이콘·인증서 검사가 남기는 메모리를 런처에 남기지 않는다
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(icons::FETCH_ARG) {
+        std::process::exit(icons::run_fetch_process(&args[2..]));
+    }
+
     let data_dir = config::default_dir();
     logging::init(&data_dir.join("logs"));
     logging::info(&format!("YT Launcher {} 시작", app::CURRENT_VERSION));

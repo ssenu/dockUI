@@ -1,12 +1,15 @@
 //! 앱 컨트롤러: 설정·트레이·패널 화면·항목 실행·업데이트·자동 실행을 연결한다.
 
+use crate::apps::{self, AppKey};
 use crate::autostart::{AutoStart, RegistryRun};
 use crate::chrome;
 use crate::config::{Config, DockEdge, LoadReport, Mode, Storage, Theme};
-use crate::items::Item;
+use crate::icons::{FETCH_ARG, icon_path, missing_icons};
+use crate::items::{Item, new_id};
 use crate::logging;
 use crate::tray::{Tray, WM_APP_TRAY};
-use crate::ui::dialogs::{YoutubeInput, youtube_dialog};
+use crate::ui::app_list::AppChoice;
+use crate::ui::dialogs::{Initial, ItemInput, item_dialog};
 use crate::ui::panel::{OpenSpec, Panel, PanelCmd, PanelHandle, UiEvent, initial_rect};
 use crate::ui::scene::{TileKind, TileView, badge_of};
 use crate::updater::{self, Release, UreqHttp};
@@ -14,14 +17,19 @@ use crate::win::instance::WM_APP_SHOW;
 use crate::win::menu::{MenuEntry, show_popup};
 use crate::win::msg_window::Handler;
 use crate::win::shell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyWindow, IDYES, KillTimer, MB_ICONQUESTION, MB_YESNO, MessageBoxW, PostMessageW, PostQuitMessage,
-    RegisterWindowMessageW, SetTimer, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
+    CHILDID_SELF, DestroyWindow, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, GA_ROOT, GetAncestor, IDYES, KillTimer,
+    MB_ICONQUESTION, MB_YESNO, MessageBoxW, OBJID_WINDOW, PostMessageW, PostQuitMessage, RegisterWindowMessageW,
+    SetTimer, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP,
+    WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::{HSTRING, w};
 
@@ -35,6 +43,11 @@ pub const WM_APP_EVENT: u32 = WM_APP + 3;
 
 const TIMER_FIRST_CHECK: usize = 1;
 const TIMER_DAILY_CHECK: usize = 2;
+/// 창이 생기거나 없어진 뒤 실행 중 점을 다시 계산 (짧게 모아서 한 번, 제목이 늦게 붙는 창을 위해 한 번 더)
+const TIMER_RUNNING: usize = 3;
+const TIMER_RUNNING_LATE: usize = 4;
+const RUNNING_DEBOUNCE_MS: u32 = 300;
+const RUNNING_LATE_MS: u32 = 2000;
 const FIRST_CHECK_MS: u32 = 30_000;
 const DAILY_CHECK_MS: u32 = 24 * 60 * 60 * 1000;
 const CLICK_DEBOUNCE: Duration = Duration::from_secs(1);
@@ -55,10 +68,17 @@ const CMD_RELEASES: u32 = 13;
 const CMD_QUIT: u32 = 14;
 
 pub enum Event {
-    Checked { manual: bool, result: Result<Option<Release>, String> },
+    Checked {
+        manual: bool,
+        result: Result<Option<Release>, String>,
+    },
     Downloaded(Result<PathBuf, String>),
     Ui(UiEvent),
     Opened(chrome::Opened),
+    /// 아이콘 캐시에 새 파일이 생김
+    IconsReady,
+    /// 앱 실행 대상을 찾지 못함 (항목 id)
+    LaunchFailed(String),
 }
 
 /// 업데이트 확인 결과를 보고 무엇을 할지 정한다 (순수 함수).
@@ -95,20 +115,107 @@ pub fn startup_notices(report: LoadReport, last_run: &str, current: &str) -> Vec
     notices
 }
 
+/// 타일에 덧붙일 상태: 캐시된 아이콘 찾기, 실행 중인 앱, 실행 대상을 찾지 못한 앱 (항목 id)
+pub struct TileStatus<'a> {
+    pub icon_of: &'a dyn Fn(&str) -> Option<PathBuf>,
+    pub running: &'a HashSet<String>,
+    pub missing: &'a HashSet<String>,
+}
+
 /// 설정의 항목 → 화면에 그릴 타일 (순수 함수)
-pub fn tile_views(items: &[Item]) -> Vec<TileView> {
+pub fn tile_views(items: &[Item], status: &TileStatus) -> Vec<TileView> {
     items
         .iter()
         .map(|item| {
+            let id = item.id();
             let label = item.display_name();
             let (kind, badge) = match item {
                 Item::Youtube { query, .. } => (TileKind::Youtube, badge_of(query)),
                 Item::App { .. } => (TileKind::App, label.chars().take(1).collect()),
                 Item::Web { .. } => (TileKind::Web, label.chars().take(1).collect::<String>().to_uppercase()),
             };
-            TileView { id: item.id().to_string(), label, badge, kind, ..Default::default() }
+            TileView {
+                id: id.to_string(),
+                badge,
+                kind,
+                icon: if kind == TileKind::Youtube { None } else { (status.icon_of)(id) },
+                running: status.running.contains(id),
+                missing: status.missing.contains(id),
+                label,
+            }
         })
         .collect()
+}
+
+/// 입력 창 결과 → 항목 (순수 함수). 앱의 표시 이름을 비우면 앱 이름을 쓴다.
+pub fn item_from_input(id: String, input: ItemInput) -> Item {
+    match input {
+        ItemInput::Youtube { query, name } => Item::Youtube { id, query, name },
+        ItemInput::App { app, name } => {
+            Item::App { id, name: if name.is_empty() { app.name } else { name }, target: app.target, exe: app.exe }
+        }
+        ItemInput::Web { url, name } => Item::Web { id, url, name },
+    }
+}
+
+/// 항목 → 수정 창의 처음 값 (순수 함수)
+pub fn input_of(item: &Item) -> ItemInput {
+    match item.clone() {
+        Item::Youtube { query, name, .. } => ItemInput::Youtube { query, name },
+        Item::App { name, target, exe, .. } => {
+            ItemInput::App { app: AppChoice { name: name.clone(), target, exe }, name }
+        }
+        Item::Web { url, name, .. } => ItemInput::Web { url, name },
+    }
+}
+
+/// 실행 대상이 바뀌어 아이콘을 다시 받아야 하는가 (순수 함수)
+pub fn icon_source_changed(before: &Item, after: &Item) -> bool {
+    match (before, after) {
+        (Item::App { target: a, .. }, Item::App { target: b, .. }) => a != b,
+        (Item::Web { url: a, .. }, Item::Web { url: b, .. }) => a != b,
+        _ => false,
+    }
+}
+
+/// 실행 중 판정에 쓰는 앱 식별 정보 (앱이 아닌 항목은 None)
+pub fn app_keys(items: &[Item]) -> Vec<Option<AppKey>> {
+    items
+        .iter()
+        .map(|item| match item {
+            Item::App { target, exe, .. } => Some(AppKey { target: target.clone(), exe: exe.clone() }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 창 변화 알림을 받을 앱 창 (WinEvent 콜백은 인자를 받지 못한다)
+static APP_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// 최상위 창이 보이거나 숨으면 실행 중 점 재계산 타이머를 (다시) 건다. 앱 스레드에서 불린다.
+unsafe extern "system" fn on_window_event(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: HWND,
+    object: i32,
+    child: i32,
+    _: u32,
+    _: u32,
+) {
+    if object != OBJID_WINDOW.0 || child != CHILDID_SELF as i32 || hwnd.0.is_null() {
+        return;
+    }
+    // SAFETY: 핸들 값만 쓰는 호출
+    unsafe {
+        if GetAncestor(hwnd, GA_ROOT) != hwnd {
+            return;
+        }
+        let app = HWND(APP_HWND.load(Ordering::Relaxed) as *mut _);
+        if !app.0.is_null() {
+            SetTimer(Some(app), TIMER_RUNNING, RUNNING_DEBOUNCE_MS, None);
+            SetTimer(Some(app), TIMER_RUNNING_LATE, RUNNING_LATE_MS, None);
+        }
+    }
 }
 
 /// 화면에서 바뀐 순서(id 목록)대로 항목을 다시 늘어놓는다. 목록에 없는 항목은 뒤에 붙인다.
@@ -156,6 +263,9 @@ pub struct App {
     events_rx: Receiver<Event>,
     taskbar_created: u32,
     pending_notices: Vec<String>,
+    running: HashSet<String>,
+    missing: HashSet<String>,
+    window_hook: Option<HWINEVENTHOOK>,
 }
 
 impl App {
@@ -180,6 +290,9 @@ impl App {
             events_rx,
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
             pending_notices,
+            running: HashSet::new(),
+            missing: HashSet::new(),
+            window_hook: None,
         }
     }
 
@@ -201,8 +314,85 @@ impl App {
         }
     }
 
+    fn tiles(&self) -> Vec<TileView> {
+        let dir = self.storage.dir.clone();
+        let icon_of = move |id: &str| Some(icon_path(&dir, id)).filter(|p| p.exists());
+        let status = TileStatus { icon_of: &icon_of, running: &self.running, missing: &self.missing };
+        tile_views(&self.config.items, &status)
+    }
+
     fn refresh_tiles(&self) {
-        self.panel_send(PanelCmd::SetTiles(tile_views(&self.config.items)));
+        self.panel_send(PanelCmd::SetTiles(self.tiles()));
+    }
+
+    /// 캐시에 아이콘이 없는 앱·웹 항목의 아이콘을 만든다 (파비콘 실패는 다음 실행 때 다시).
+    /// 셸 아이콘 추출과 HTTPS 인증서 검사는 수십 MB를 남기므로 잠깐 뜨는 하위 프로세스에 맡긴다.
+    fn fetch_icons(&self, items: Vec<Item>) {
+        let dir = self.storage.dir.clone();
+        let todo = missing_icons(&dir, &items);
+        if todo.is_empty() {
+            return;
+        }
+        let Ok(json) = serde_json::to_string(&todo) else { return };
+        let send = self.post_event();
+        std::thread::spawn(move || {
+            let status = std::env::current_exe()
+                .and_then(|exe| std::process::Command::new(exe).arg(FETCH_ARG).arg(&dir).arg(json).status());
+            match status {
+                Ok(s) if s.success() => send(Event::IconsReady),
+                Ok(_) => logging::info("일부 아이콘을 만들지 못했습니다 (다음 실행 때 다시 시도)"),
+                Err(e) => logging::warn(&format!("아이콘 프로세스 실행 실패: {e}")),
+            }
+        });
+    }
+
+    fn remove_icon(&self, id: &str) {
+        let _ = std::fs::remove_file(icon_path(&self.storage.dir, id));
+    }
+
+    /// 지금 열린 창으로 실행 중인 앱을 다시 계산하고, 바뀌었으면 화면에 알린다.
+    fn update_running(&mut self) {
+        let keys = app_keys(&self.config.items);
+        let running: HashSet<String> = if keys.iter().all(Option::is_none) {
+            HashSet::new()
+        } else {
+            let flags = apps::running_flags(&keys, &apps::current_windows());
+            self.config.items.iter().zip(flags).filter(|(_, on)| *on).map(|(i, _)| i.id().to_string()).collect()
+        };
+        if running != self.running {
+            // 실행 중인 앱은 찾지 못함 표시를 지운다
+            self.missing.retain(|id| !running.contains(id));
+            self.running = running;
+            self.refresh_tiles();
+        }
+    }
+
+    fn watch_windows(&mut self, hwnd: HWND) {
+        APP_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+        // SAFETY: 우리 스레드 메시지 루프로 불리는 창 표시·숨김 알림
+        let hook = unsafe {
+            SetWinEventHook(
+                EVENT_OBJECT_SHOW,
+                EVENT_OBJECT_HIDE,
+                None,
+                Some(on_window_event),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            )
+        };
+        if hook.0.is_null() {
+            logging::warn("창 변화 알림을 등록하지 못했습니다 (실행 중 표시 없음)");
+        } else {
+            self.window_hook = Some(hook);
+        }
+    }
+
+    fn unwatch_windows(&mut self) {
+        if let Some(hook) = self.window_hook.take() {
+            let _ = unsafe { UnhookWinEvent(hook) };
+        }
+        APP_HWND.store(0, Ordering::Relaxed);
     }
 
     /// 창이 만들어진 직후 한 번 호출된다.
@@ -220,7 +410,10 @@ impl App {
         {
             logging::error(&format!("자동 실행 설정 실패: {e}"));
         }
+        self.update_running_silently();
         self.open_panel();
+        self.watch_windows(hwnd);
+        self.fetch_icons(self.config.items.clone());
         for notice in std::mem::take(&mut self.pending_notices) {
             self.notify(&notice);
         }
@@ -229,6 +422,16 @@ impl App {
             self.save();
         }
         unsafe { SetTimer(Some(hwnd), TIMER_FIRST_CHECK, FIRST_CHECK_MS, None) };
+    }
+
+    /// 화면을 열기 전 첫 계산 (화면에 보낼 곳이 아직 없다)
+    fn update_running_silently(&mut self) {
+        let keys = app_keys(&self.config.items);
+        if keys.iter().any(Option::is_some) {
+            let flags = apps::running_flags(&keys, &apps::current_windows());
+            self.running =
+                self.config.items.iter().zip(flags).filter(|(_, on)| *on).map(|(i, _)| i.id().to_string()).collect();
+        }
     }
 
     fn open_panel(&mut self) {
@@ -240,7 +443,7 @@ impl App {
             panel_rect: initial_rect(self.config.panel_window),
             theme: self.config.theme,
             locked: self.config.locked,
-            tiles: tile_views(&self.config.items),
+            tiles: self.tiles(),
         };
         match Panel::open(spec, notify) {
             Ok(handle) => self.panel = Some(handle),
@@ -266,12 +469,13 @@ impl App {
         match event {
             UiEvent::TileClicked(id) => self.open_item(&id),
             UiEvent::AddRequested => {
-                if let Some(input) = youtube_dialog(self.dialog_owner(), "항목 추가", &YoutubeInput::default())
-                    && let Ok(item) = Item::youtube(&input.query, &input.name)
-                {
-                    self.config.items.push(item);
+                if let Some(input) = item_dialog(self.dialog_owner(), "항목 추가", &Initial::New) {
+                    let item = item_from_input(new_id(), input);
+                    self.config.items.push(item.clone());
                     self.save();
+                    self.update_running();
                     self.refresh_tiles();
+                    self.fetch_icons(vec![item]);
                 }
             }
             UiEvent::EditRequested(id) => self.edit_item(&id),
@@ -291,14 +495,18 @@ impl App {
 
     fn edit_item(&mut self, id: &str) {
         let Some(index) = self.config.items.iter().position(|i| i.id() == id) else { return };
-        if let Item::Youtube { query, name, .. } = &self.config.items[index] {
-            let initial = YoutubeInput { query: query.clone(), name: name.clone() };
-            if let Some(input) = youtube_dialog(self.dialog_owner(), "항목 수정", &initial) {
-                self.config.items[index] = Item::Youtube { id: id.to_string(), query: input.query, name: input.name };
-                self.save();
-                self.refresh_tiles();
-            }
+        let initial = Initial::Edit(input_of(&self.config.items[index]));
+        let Some(input) = item_dialog(self.dialog_owner(), "항목 수정", &initial) else { return };
+        let item = item_from_input(id.to_string(), input);
+        if icon_source_changed(&self.config.items[index], &item) {
+            self.remove_icon(id);
+            self.missing.remove(id);
         }
+        self.config.items[index] = item.clone();
+        self.save();
+        self.update_running();
+        self.refresh_tiles();
+        self.fetch_icons(vec![item]);
     }
 
     fn delete_item(&mut self, id: &str) {
@@ -310,6 +518,9 @@ impl App {
         if answer == IDYES {
             self.config.items.retain(|i| i.id() != id);
             self.save();
+            self.remove_icon(id);
+            self.running.remove(id);
+            self.missing.remove(id);
             self.refresh_tiles();
         }
     }
@@ -324,7 +535,16 @@ impl App {
             let result = match &item {
                 Item::Youtube { query, .. } => chrome::open_url(&chrome::build_search_url(query), Some("YouTube")),
                 Item::Web { url, .. } => chrome::open_url(url, None),
-                Item::App { .. } => return, // 4단계에서 연결
+                Item::App { id, target, exe, .. } => {
+                    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+                    let key = AppKey { target: target.clone(), exe: exe.clone() };
+                    if let Err(e) = apps::launch(&key) {
+                        logging::warn(&format!("앱 실행 실패 ({target}): {e}"));
+                        send(Event::LaunchFailed(id.clone()));
+                    }
+                    unsafe { CoUninitialize() };
+                    return;
+                }
             };
             match result {
                 Ok(opened) => send(Event::Opened(opened)),
@@ -496,6 +716,7 @@ impl App {
     }
 
     fn quit(&mut self) {
+        self.unwatch_windows();
         if let Some(tray) = self.tray.take() {
             tray.remove();
         }
@@ -530,6 +751,12 @@ impl Handler for App {
                             self.notify("크롬을 찾지 못해 기본 브라우저로 열었습니다.");
                         }
                         Event::Opened(_) => {}
+                        Event::IconsReady => self.refresh_tiles(),
+                        Event::LaunchFailed(id) => {
+                            self.missing.insert(id);
+                            self.refresh_tiles();
+                            self.notify("앱을 찾을 수 없습니다. 수정에서 다시 선택하세요.");
+                        }
                     }
                 }
             }
@@ -541,9 +768,14 @@ impl Handler for App {
                     self.check_updates(false);
                 }
                 TIMER_DAILY_CHECK => self.check_updates(false),
+                TIMER_RUNNING | TIMER_RUNNING_LATE => {
+                    let _ = unsafe { KillTimer(Some(hwnd), wparam.0) };
+                    self.update_running();
+                }
                 _ => return None,
             },
             WM_DESTROY => {
+                self.unwatch_windows();
                 if let Some(tray) = self.tray.take() {
                     tray.remove();
                 }
@@ -614,7 +846,8 @@ mod tests {
             Item::Web { id: "w".into(), url: "https://github.com".into(), name: "".into() },
             Item::App { id: "a".into(), name: "계산기".into(), target: "Calc!App".into(), exe: None },
         ];
-        let views = tile_views(&items);
+        let none = HashSet::new();
+        let views = tile_views(&items, &TileStatus { icon_of: &|_| None, running: &none, missing: &none });
         assert_eq!(
             views[0],
             TileView {
@@ -630,6 +863,57 @@ mod tests {
             ("github.com", "G", TileKind::Web)
         );
         assert_eq!((views[2].badge.as_str(), views[2].kind), ("계", TileKind::App));
+    }
+
+    #[test]
+    fn tile_views_add_icons_running_and_missing_state() {
+        let items = vec![
+            Item::Youtube { id: "y".into(), query: "음악".into(), name: "".into() },
+            Item::App { id: "a".into(), name: "계산기".into(), target: "Calc!App".into(), exe: None },
+            Item::Web { id: "w".into(), url: "https://github.com".into(), name: "".into() },
+        ];
+        let running = HashSet::from(["a".to_string()]);
+        let missing = HashSet::from(["w".to_string()]);
+        let icon_of = |id: &str| Some(PathBuf::from(format!("{id}.png")));
+        let views = tile_views(&items, &TileStatus { icon_of: &icon_of, running: &running, missing: &missing });
+        // 유튜브는 직접 그리므로 아이콘 파일을 쓰지 않는다
+        assert_eq!(views[0].icon, None);
+        assert_eq!(views[1].icon, Some(PathBuf::from("a.png")));
+        assert_eq!((views[1].running, views[1].missing), (true, false));
+        assert_eq!((views[2].running, views[2].missing), (false, true));
+    }
+
+    #[test]
+    fn dialog_input_round_trips_to_items() {
+        let calc = AppChoice { name: "계산기".into(), target: "Calc!App".into(), exe: None };
+        let app = item_from_input("1".into(), ItemInput::App { app: calc.clone(), name: "".into() });
+        assert_eq!(app, Item::App { id: "1".into(), name: "계산기".into(), target: "Calc!App".into(), exe: None });
+        let named = item_from_input("2".into(), ItemInput::App { app: calc, name: "계산".into() });
+        assert_eq!(named.display_name(), "계산");
+        let web = item_from_input("3".into(), ItemInput::Web { url: "https://naver.com".into(), name: "".into() });
+        assert_eq!(input_of(&web), ItemInput::Web { url: "https://naver.com".into(), name: "".into() });
+        let yt = Item::Youtube { id: "4".into(), query: "로파이".into(), name: "공부".into() };
+        assert_eq!(item_from_input("4".into(), input_of(&yt)), yt);
+        assert_eq!(item_from_input("1".into(), input_of(&app)), app);
+    }
+
+    #[test]
+    fn icon_is_refetched_only_when_target_changes() {
+        let app = |t: &str| Item::App { id: "a".into(), name: "x".into(), target: t.into(), exe: None };
+        let web = |u: &str, n: &str| Item::Web { id: "w".into(), url: u.into(), name: n.into() };
+        assert!(icon_source_changed(&app("A!App"), &app("B!App")));
+        assert!(!icon_source_changed(&app("A!App"), &app("A!App")));
+        assert!(!icon_source_changed(&web("https://a.com", ""), &web("https://a.com", "에이")));
+        assert!(icon_source_changed(&web("https://a.com", ""), &web("https://b.com", "")));
+    }
+
+    #[test]
+    fn app_keys_only_for_app_items() {
+        let items = vec![
+            Item::Youtube { id: "y".into(), query: "음악".into(), name: "".into() },
+            Item::App { id: "a".into(), name: "x".into(), target: "T".into(), exe: Some(r"C:\x.exe".into()) },
+        ];
+        assert_eq!(app_keys(&items), vec![None, Some(AppKey { target: "T".into(), exe: Some(r"C:\x.exe".into()) })]);
     }
 
     #[test]
