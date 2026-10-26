@@ -173,17 +173,21 @@ impl PanelLayout {
 
     /// 테마 선택 원의 중심: 팔레트 버튼을 중심으로 위쪽(-90°)부터 왼쪽(-180°)까지 부채꼴.
     pub fn swatch_centers(&self, count: usize, progress: f32) -> Vec<Pt> {
-        let anchor = self.palette_button.center();
-        let (start, end) = (-90.0f32, -180.0f32);
-        let step = if count > 1 { (end - start) / (count - 1) as f32 } else { 0.0 };
-        (0..count)
-            .map(|i| {
-                let a = (start + step * i as f32).to_radians();
-                let r = PICKER_RADIUS * progress;
-                Pt { x: anchor.x + r * a.cos(), y: anchor.y + r * a.sin() }
-            })
-            .collect()
+        fan_points(self.palette_button.center(), (-90.0, -180.0), count, PICKER_RADIUS * progress)
     }
+}
+
+/// `anchor`를 중심으로 반지름 `radius`인 원호 위에 `count`개 점을 각도 범위(도)에 고르게 놓는다.
+/// Qt·Win32 좌표처럼 y가 아래로 커지므로 -90°가 위쪽이다.
+pub fn fan_points(anchor: Pt, angles: (f32, f32), count: usize, radius: f32) -> Vec<Pt> {
+    let (start, end) = angles;
+    let step = if count > 1 { (end - start) / (count - 1) as f32 } else { 0.0 };
+    (0..count)
+        .map(|i| {
+            let a = (start + step * i as f32).to_radians();
+            Pt { x: anchor.x + radius * a.cos(), y: anchor.y + radius * a.sin() }
+        })
+        .collect()
 }
 
 fn dist2(a: Pt, b: Pt) -> f32 {
