@@ -11,7 +11,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const REPO: &str = "ssenu/YT-launcher";
+pub const REPO: &str = "ssenu/dockUI";
 pub const SUMS_NAME: &str = "SHA256SUMS.txt";
 pub const INSTALLER_PREFIX: &str = "YT-Launcher-Setup-";
 pub const SILENT_ARGS: [&str; 3] = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"];
@@ -352,7 +352,7 @@ mod tests {
     fn release_json() -> Value {
         json!({
             "tag_name": "v0.2.0",
-            "html_url": "https://github.com/ssenu/YT-launcher/releases/tag/v0.2.0",
+            "html_url": "https://github.com/ssenu/dockUI/releases/tag/v0.2.0",
             "draft": false, "prerelease": false,
             "assets": [
                 {"name": "YT-Launcher-Setup-0.2.0.exe", "browser_download_url": "https://dl/setup.exe", "size": INSTALLER.len()},

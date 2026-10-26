@@ -10,7 +10,7 @@
 
 ## 설치
 
-[Releases](https://github.com/ssenu/YT-launcher/releases/latest)에서 `YT-Launcher-Setup-<버전>.exe`를 받아 실행한다.
+[Releases](https://github.com/ssenu/dockUI/releases/latest)에서 `YT-Launcher-Setup-<버전>.exe`를 받아 실행한다.
 코드 서명이 없어 처음에 "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**을 누른다.
 0.1.x를 쓰고 있었다면 트레이의 업데이트 설치로 바로 넘어오고, 설정은 그대로 옮겨진다(원본은 `%APPDATA%\YT-Launcher\config.v1.json`).
 

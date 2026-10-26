@@ -36,7 +36,7 @@ use windows::core::{HSTRING, w};
 pub const APP_NAME: &str = "YT Launcher";
 pub const BYLINE: &str = "by_ssenu";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const RELEASES_URL: &str = "https://github.com/ssenu/YT-launcher/releases/latest";
+pub const RELEASES_URL: &str = "https://github.com/ssenu/dockUI/releases/latest";
 
 /// 백그라운드 작업 결과가 채널에 들어왔음을 알리는 메시지
 pub const WM_APP_EVENT: u32 = WM_APP + 3;
