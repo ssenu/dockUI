@@ -126,6 +126,34 @@ fn load_fonts(factory: &IDWriteFactory5) -> Result<IDWriteFontCollection1> {
     }
 }
 
+/// 기본 컨트롤(EDIT 등)에 쓸 Pretendard GDI 글꼴. 처음 부를 때 exe 안 글꼴을 이 프로세스에 등록한다.
+/// `height`는 실제 픽셀 글자 높이.
+pub fn gdi_font(height: i32, semibold: bool) -> windows::Win32::Graphics::Gdi::HFONT {
+    use windows::Win32::Graphics::Gdi::{
+        AddFontMemResourceEx, CLEARTYPE_QUALITY, CreateFontIndirectW, DEFAULT_CHARSET, LOGFONTW,
+    };
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        for data in [FONT_REGULAR, FONT_SEMIBOLD] {
+            let count = 0u32;
+            // SAFETY: 글꼴 데이터는 'static, 등록한 글꼴은 프로세스가 끝날 때 풀린다
+            let _ = unsafe { AddFontMemResourceEx(data.as_ptr().cast(), data.len() as u32, None, &count) };
+        }
+    });
+    let mut lf = LOGFONTW {
+        lfHeight: -height,
+        lfWeight: if semibold { 600 } else { 400 },
+        lfCharSet: DEFAULT_CHARSET,
+        lfQuality: CLEARTYPE_QUALITY,
+        ..Default::default()
+    };
+    for (dst, src) in lf.lfFaceName.iter_mut().zip(FONT_FAMILY.encode_utf16()) {
+        *dst = src;
+    }
+    // SAFETY: 채운 LOGFONTW로 글꼴을 만든다 (Pretendard가 없으면 비슷한 글꼴로 대체된다)
+    unsafe { CreateFontIndirectW(&lf) }
+}
+
 /// 그림이 나가는 곳: 창(DirectComposition 스왑체인) 또는 이미지(PNG 확인용)
 enum Surface {
     Window {
@@ -136,8 +164,12 @@ enum Surface {
         _target: IDCompositionTarget,
         _visual: IDCompositionVisual,
     },
-    #[cfg_attr(not(test), allow(dead_code))]
-    Image { wic: IWICImagingFactory, bitmap: IWICBitmap },
+    Image {
+        /// PNG 저장(테스트)에만 쓴다
+        #[cfg_attr(not(test), allow(dead_code))]
+        wic: IWICImagingFactory,
+        bitmap: IWICBitmap,
+    },
 }
 
 pub struct Gfx {
@@ -325,6 +357,13 @@ impl Gfx {
         }
     }
 
+    pub fn stroke_ellipse(&self, center: Pt, rx: f32, ry: f32, c: Color, width: f32) {
+        if let Some(b) = self.brush(c) {
+            let e = D2D1_ELLIPSE { point: point(center), radiusX: rx, radiusY: ry };
+            unsafe { self.ctx.DrawEllipse(&e, &b, width, None) };
+        }
+    }
+
     pub fn stroke_circle(&self, center: Pt, radius: f32, c: Color, width: f32) {
         if let Some(b) = self.brush(c) {
             let e = D2D1_ELLIPSE { point: point(center), radiusX: radius, radiusY: radius };
@@ -434,7 +473,8 @@ impl Gfx {
             let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             let trimming =
                 DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
-            let _ = format.SetTrimming(&trimming, None);
+            let sign = self.dwrite.CreateEllipsisTrimmingSign(&format).ok();
+            let _ = format.SetTrimming(&trimming, sign.as_ref());
             Some(format)
         }
     }
@@ -471,21 +511,17 @@ impl Gfx {
     }
 }
 
-/// 테스트에서 창 없이 장면을 PNG로 그려 보는 기능
-#[cfg(test)]
+/// 창 없이 이미지에 그리는 기능: 입력 창 그림(WM_PAINT에서 DC로 옮김)과 테스트 PNG 확인용
 mod offscreen {
     use super::*;
-    use windows::Win32::Foundation::GENERIC_WRITE;
     use windows::Win32::Graphics::Direct2D::D2D1_RENDER_TARGET_PROPERTIES;
-    use windows::Win32::Graphics::Imaging::{
-        CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad,
-        WICBitmapEncoderNoCache,
-    };
-    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+    use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HDC, SetDIBitsToDevice};
+    use windows::Win32::Graphics::Imaging::WICBitmapCacheOnLoad;
 
     impl Gfx {
-        /// 창 없이 이미지에 그린다 (화면 확인용 PNG 저장). COM이 초기화돼 있어야 한다.
+        /// 창 없이 이미지에 그린다. COM이 초기화돼 있어야 한다.
         pub fn offscreen(width: u32, height: u32, scale: f32) -> Result<Gfx> {
+            let (width, height) = (width.max(1), height.max(1));
             // SAFETY: WIC 비트맵을 만들고 그 위에 Direct2D 대상을 만든다
             unsafe {
                 let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
@@ -509,11 +545,41 @@ mod offscreen {
             }
         }
 
+        /// 이미지 대상에 그린 그림을 창 DC의 (0, 0)에 그대로 옮긴다 (불투명 그림 전용).
+        pub fn copy_to_dc(&self, hdc: HDC) {
+            let Surface::Image { bitmap, .. } = &self.surface else { return };
+            let (w, h) = (self.width, self.height);
+            let stride = w * 4;
+            let mut pixels = vec![0u8; (stride * h) as usize];
+            // SAFETY: 비트맵 크기만큼의 버퍼로 복사한 뒤 위에서 아래 순서 DIB로 그린다
+            unsafe {
+                if bitmap.CopyPixels(std::ptr::null(), stride, &mut pixels).is_err() {
+                    return;
+                }
+                let info = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w as i32,
+                        biHeight: -(h as i32),
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                SetDIBitsToDevice(hdc, 0, 0, w, h, 0, 0, 0, h, pixels.as_ptr().cast(), &info, DIB_RGB_COLORS);
+            }
+        }
+
         /// 이미지 대상이면 PNG로 저장한다.
+        #[cfg(test)]
         pub fn save_png(&self, path: &std::path::Path) -> Result<()> {
             let Surface::Image { wic, bitmap } = &self.surface else { return Ok(()) };
             // SAFETY: WIC 인코더로 파일에 쓴다
             unsafe {
+                use windows::Win32::Foundation::GENERIC_WRITE;
+                use windows::Win32::Graphics::Imaging::WICBitmapEncoderNoCache;
                 let stream = wic.CreateStream()?;
                 stream.InitializeFromFilename(&HSTRING::from(path.as_os_str()), GENERIC_WRITE.0)?;
                 let encoder = wic.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null())?;

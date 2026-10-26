@@ -12,6 +12,7 @@ use crate::ui::app_list::AppChoice;
 use crate::ui::dialogs::{Initial, ItemInput, item_dialog};
 use crate::ui::panel::{OpenSpec, Panel, PanelCmd, PanelHandle, UiEvent, initial_rect};
 use crate::ui::scene::{TileKind, TileView, badge_of};
+use crate::ui::theme::{self, PICKER_ORDER};
 use crate::updater::{self, Release, UreqHttp};
 use crate::win::instance::WM_APP_SHOW;
 use crate::win::menu::{MenuEntry, show_popup};
@@ -53,6 +54,9 @@ const DAILY_CHECK_MS: u32 = 24 * 60 * 60 * 1000;
 const CLICK_DEBOUNCE: Duration = Duration::from_secs(1);
 
 const CMD_SHOW: u32 = 20;
+const CMD_ADD: u32 = 23;
+/// 테마 고르기: CMD_THEME + PICKER_ORDER 번호
+const CMD_THEME: u32 = 40;
 const CMD_MODE_DOCK: u32 = 30;
 const CMD_MODE_PANEL: u32 = 31;
 const CMD_EDGE_BOTTOM: u32 = 32;
@@ -468,16 +472,7 @@ impl App {
     fn on_ui(&mut self, event: UiEvent) {
         match event {
             UiEvent::TileClicked(id) => self.open_item(&id),
-            UiEvent::AddRequested => {
-                if let Some(input) = item_dialog(self.dialog_owner(), "항목 추가", &Initial::New) {
-                    let item = item_from_input(new_id(), input);
-                    self.config.items.push(item.clone());
-                    self.save();
-                    self.update_running();
-                    self.refresh_tiles();
-                    self.fetch_icons(vec![item]);
-                }
-            }
+            UiEvent::AddRequested => self.add_item(),
             UiEvent::EditRequested(id) => self.edit_item(&id),
             UiEvent::DeleteRequested(id) => self.delete_item(&id),
             UiEvent::Reordered(ids) => {
@@ -490,6 +485,17 @@ impl App {
                 self.save();
             }
             UiEvent::MenuRequested => self.show_menu(),
+        }
+    }
+
+    fn add_item(&mut self) {
+        if let Some(input) = item_dialog(self.dialog_owner(), "항목 추가", &Initial::New) {
+            let item = item_from_input(new_id(), input);
+            self.config.items.push(item.clone());
+            self.save();
+            self.update_running();
+            self.refresh_tiles();
+            self.fetch_icons(vec![item]);
         }
     }
 
@@ -648,6 +654,15 @@ impl App {
             MenuEntry::label(format!("{APP_NAME}  {BYLINE}  v{CURRENT_VERSION}")),
             MenuEntry::Separator,
             MenuEntry::item(CMD_SHOW, "런처 보이기"),
+            MenuEntry::item(CMD_ADD, "항목 추가…"),
+            MenuEntry::submenu(
+                "테마",
+                PICKER_ORDER
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| MenuEntry::checked(CMD_THEME + i as u32, theme::label(*t), *t == self.config.theme))
+                    .collect(),
+            ),
             MenuEntry::Separator,
             MenuEntry::checked(CMD_MODE_DOCK, "독 모드", dock),
             MenuEntry::checked(CMD_MODE_PANEL, "패널 모드", !dock),
@@ -689,6 +704,10 @@ impl App {
     fn show_menu(&mut self) {
         match show_popup(self.hwnd, &self.menu_entries()) {
             CMD_SHOW => self.panel_send(PanelCmd::Show),
+            CMD_ADD => self.add_item(),
+            id if (CMD_THEME..CMD_THEME + PICKER_ORDER.len() as u32).contains(&id) => {
+                self.set_theme(PICKER_ORDER[(id - CMD_THEME) as usize]);
+            }
             CMD_MODE_DOCK => self.set_mode(Mode::Dock, self.config.dock_edge),
             CMD_MODE_PANEL => self.set_mode(Mode::Panel, self.config.dock_edge),
             CMD_EDGE_BOTTOM => self.set_mode(Mode::Dock, DockEdge::Bottom),

@@ -19,6 +19,12 @@ fn set_attr<T>(hwnd: HWND, attr: windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBU
     unsafe { DwmSetWindowAttribute(hwnd, attr, (value as *const T).cast(), std::mem::size_of::<T>() as u32) }.is_ok()
 }
 
+/// Windows 11 둥근 모서리 (그 전 버전에서는 아무 일도 하지 않는다)
+pub fn round_corners(hwnd: HWND) {
+    let corner: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+    set_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner);
+}
+
 /// 블러 배경의 밝기 톤 (어두운 테마면 true)
 pub fn set_dark(hwnd: HWND, dark: bool) -> bool {
     let value: i32 = dark.into();

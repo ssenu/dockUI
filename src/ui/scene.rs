@@ -1,8 +1,8 @@
-//! 패널 한 프레임 그리기: 유리 덧칠, 헤더, 아이콘, ＋, 팔레트 버튼, 말풍선, 테마 선택기, 드래그 중인 아이콘.
+//! 패널·독 한 프레임 그리기: 유리 덧칠, 헤더, 아이콘, ＋, 팔레트 버튼, 말풍선, 테마 선택기, 드래그 중인 아이콘.
 
 use crate::config::DockEdge;
 use crate::config::Theme;
-use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
+use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot, TOOLTIP_MAX_W};
 use crate::ui::gfx::{Align, Gfx, Weight};
 use crate::ui::layout::{PANEL_HOVER_SCALE, PanelLayout, Pt, RectF, SWATCH};
 use crate::ui::theme::{ACCENT, Color, FALLBACK_ALPHA, PICKER_ORDER, Palette, TOOLTIP_BG, TOOLTIP_TEXT};
@@ -157,23 +157,19 @@ fn draw_add(g: &Gfx, r: RectF, p: &Palette) {
     g.line(Pt { x: c.x, y: c.y - arm }, Pt { x: c.x, y: c.y + arm }, p.subtext, width);
 }
 
-/// 둥근 보조 버튼 바탕. `floating`이면 그림자 있는 떠 있는 버튼(패널), 아니면 판에 붙은 납작한 버튼(독).
-fn draw_round_button(g: &Gfx, c: Pt, radius: f32, p: &Palette, hover: bool, floating: bool) {
-    if floating {
-        g.soft_shadow(RectF::new(c.x - radius, c.y - radius, radius * 2.0, radius * 2.0), radius, 0.8);
-        let face = p.tint.with_alpha(1.0).shade(if p.dark_backdrop { 0.10 } else { -0.03 });
-        g.fill_circle(c, radius, if hover { face.shade(0.06) } else { face });
-    } else {
-        g.fill_circle(c, radius, p.text.with_alpha(if hover { 0.16 } else { 0.08 }));
-    }
+/// 그림자 있는 떠 있는 둥근 버튼 바탕 (패널 팔레트 버튼)
+fn draw_round_button(g: &Gfx, c: Pt, radius: f32, p: &Palette, hover: bool) {
+    g.soft_shadow(RectF::new(c.x - radius, c.y - radius, radius * 2.0, radius * 2.0), radius, 0.8);
+    let face = p.tint.with_alpha(1.0).shade(if p.dark_backdrop { 0.10 } else { -0.03 });
+    g.fill_circle(c, radius, if hover { face.shade(0.06) } else { face });
     g.stroke_circle(c, radius - 0.5, p.divider, 1.0);
 }
 
 /// 원 안에 그린 팔레트: 테두리 + 엄지 구멍 + 물감 네 방울
-fn draw_palette_button(g: &Gfx, r: RectF, p: &Palette, hover: bool, floating: bool) {
+fn draw_palette_button(g: &Gfx, r: RectF, p: &Palette, hover: bool) {
     let c = r.center();
     let radius = r.w / 2.0;
-    draw_round_button(g, c, radius, p, hover, floating);
+    draw_round_button(g, c, radius, p, hover);
     let body = radius * 0.54;
     g.stroke_circle(c, body, p.text, 1.6);
     g.stroke_circle(Pt { x: c.x + body * 0.42, y: c.y + body * 0.42 }, body * 0.2, p.text, 1.4);
@@ -203,16 +199,22 @@ fn draw_header(g: &Gfx, s: &SceneState) {
     g.line(Pt { x: h.x, y: h.bottom() }, Pt { x: h.right(), y: h.bottom() }, p.divider, 1.0);
 }
 
+/// 말풍선 너비: 글자에 맞추되 최대 너비·창 너비를 넘지 않게 (넘치는 글자는 … 으로)
+fn tooltip_width(g: &Gfx, text: &str, room: f32) -> f32 {
+    (g.measure(text, 12.0, Weight::SemiBold) + 20.0).min(TOOLTIP_MAX_W).min(room - 8.0).max(40.0)
+}
+
 /// 말풍선 상자. 어두운 배경(투명 테마)에서도 경계가 보이게 옅은 테두리를 두른다.
 fn draw_tooltip_box(g: &Gfx, text: &str, r: RectF) {
     g.fill_round_rect(r, 8.0, TOOLTIP_BG);
     g.stroke_round_rect(RectF::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0), 7.5, Color::hex(0xFFFFFF, 0.14), 1.0);
-    g.text(text, r, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
+    let inner = RectF::new(r.x + 10.0, r.y, r.w - 20.0, r.h);
+    g.text(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
 }
 
 /// 아이콘 위에 말풍선을 띄운다. 위쪽이 `top_limit`보다 올라가면(헤더를 가리면) 아래에 띄운다.
 fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limit: f32) {
-    let w = g.measure(text, 12.0, Weight::SemiBold) + 20.0;
+    let w = tooltip_width(g, text, bounds.0);
     let h = 26.0;
     let mut x = anchor.center().x - w / 2.0;
     x = x.clamp(6.0, (bounds.0 - w - 6.0).max(6.0));
@@ -322,7 +324,7 @@ pub fn draw(g: &Gfx, s: &SceneState) {
     let add_slot = s.tiles.len();
     let add_level = s.hover.get(add_slot).copied().unwrap_or(0.0);
     draw_add(g, s.layout.add_cell().scaled(1.0 + (PANEL_HOVER_SCALE - 1.0) * add_level), p);
-    draw_palette_button(g, s.layout.palette_button, p, s.palette_hover, true);
+    draw_palette_button(g, s.layout.palette_button, p, s.palette_hover);
 
     if s.picker > 0.0 {
         draw_picker(g, s);
@@ -349,20 +351,16 @@ pub struct DockScene<'a> {
     pub acrylic: bool,
     pub tiles: &'a [TileView],
     pub pressed: Option<usize>,
-    /// 말풍선을 띄울 칸 번호 (항목·＋·팔레트·메뉴 순서)
+    /// 말풍선을 띄울 칸 번호
     pub tooltip: Option<usize>,
-    pub menu_hover: bool,
-    pub palette_hover: bool,
     /// 드래그 중인 항목 (번호, 마우스 위치)
     pub drag: Option<(usize, Pt)>,
-    pub picker: f32,
-    pub picker_hover: Option<usize>,
-    pub theme: Theme,
 }
 
-/// 독 말풍선: 판 반대쪽(화면 안쪽)에 띄운다.
-fn draw_dock_tooltip(g: &Gfx, text: &str, icon: RectF, edge: DockEdge, bounds: (f32, f32)) {
-    let w = g.measure(text, 12.0, Weight::SemiBold) + 20.0;
+/// 독 말풍선 사각형: 판 반대쪽(화면 안쪽)에 띄운다. 창 영역 계산에도 쓴다.
+pub fn dock_tooltip_rect(g: &Gfx, text: &str, icon: RectF, edge: DockEdge, bounds: (f32, f32)) -> RectF {
+    let room = if dock_layout::is_vertical(edge) { bounds.0 - icon.right() - 8.0 } else { bounds.0 };
+    let w = tooltip_width(g, text, room.max(48.0));
     let h = 26.0;
     let c = icon.center();
     let (x, y) = match edge {
@@ -373,38 +371,15 @@ fn draw_dock_tooltip(g: &Gfx, text: &str, icon: RectF, edge: DockEdge, bounds: (
     };
     let x = x.clamp(4.0, (bounds.0 - w - 4.0).max(4.0));
     let y = y.clamp(4.0, (bounds.1 - h - 4.0).max(4.0));
-    let r = RectF::new(x, y, w, h);
-    draw_tooltip_box(g, text, r);
+    RectF::new(x, y, w, h)
 }
 
-fn draw_dots(g: &Gfx, r: RectF, p: &Palette, hover: bool) {
-    let c = r.center();
-    draw_round_button(g, c, r.w / 2.0, p, hover, false);
-    let step = r.w * 0.17;
-    for dx in [-step, 0.0, step] {
-        g.fill_circle(Pt { x: c.x + dx, y: c.y }, r.w * 0.055, p.text);
+/// 독 칸의 말풍선 글자
+pub fn dock_tooltip_text<'a>(layout: &DockLayout, tiles: &'a [TileView], slot: usize) -> &'a str {
+    match layout.slots().get(slot) {
+        Some(Slot::Tile(t)) => tiles.get(*t).map_or("", |v| v.label.as_str()),
+        _ => "항목 추가",
     }
-}
-
-/// 테마 선택 원 중심 (독): 팔레트 칸 바깥쪽에 판과 나란히 한 줄
-pub fn dock_swatch_centers(layout: &DockLayout, mag: &Magnified, center: (f32, f32), progress: f32) -> Vec<Pt> {
-    layout.swatch_row(mag, center, layout.tiles + 1, PICKER_ORDER.len(), progress)
-}
-
-/// 독 테마 선택 원 뒤에 까는 받침 판 (펼침 정도만큼 나타난다)
-fn draw_swatch_tray(g: &Gfx, centers: &[Pt], progress: f32, p: &Palette) {
-    let (Some(first), Some(last)) = (centers.first(), centers.last()) else { return };
-    let pad = SWATCH / 2.0 + 12.0;
-    let r = RectF::new(
-        first.x.min(last.x) - pad,
-        first.y.min(last.y) - pad,
-        (last.x - first.x).abs() + 2.0 * pad,
-        (last.y - first.y).abs() + 2.0 * pad,
-    );
-    let fade = progress.clamp(0.0, 1.0);
-    g.soft_shadow(r, pad, 1.2 * fade);
-    g.fill_round_rect(r, pad, p.tint.with_alpha(FALLBACK_ALPHA * fade));
-    g.stroke_round_rect(r, pad, p.divider.with_alpha(p.divider.a * fade), 1.0);
 }
 
 pub fn draw_dock(g: &Gfx, s: &DockScene) {
@@ -414,19 +389,6 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
     let bar = RectF::new(bar.x + 0.5, bar.y + 0.5, bar.w - 1.0, bar.h - 1.0);
     g.fill_round_rect(bar, WINDOW_RADIUS, tint);
     g.stroke_round_rect(bar, WINDOW_RADIUS, p.divider, 1.0);
-
-    if !s.mag.separator.is_nan() {
-        let along = s.mag.separator;
-        let inset = dock_layout::PAD + 4.0;
-        let (a, b) = if dock_layout::is_vertical(s.layout.edge) {
-            let y = s.center.1 + along;
-            (Pt { x: bar.x + inset, y }, Pt { x: bar.right() - inset, y })
-        } else {
-            let x = s.center.0 + along;
-            (Pt { x, y: bar.y + inset }, Pt { x, y: bar.bottom() - inset })
-        };
-        g.line(a, b, p.divider, 1.0);
-    }
 
     for (i, slot) in s.layout.slots().iter().enumerate() {
         let mut r = s.layout.slot_rect(s.mag, s.center, i);
@@ -444,30 +406,16 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
                 }
             }
             Slot::Add => draw_add(g, r, p),
-            Slot::Palette => draw_palette_button(g, r.scaled(0.84), p, s.palette_hover, false),
-            Slot::Menu => draw_dots(g, r.scaled(0.84), p, s.menu_hover),
         }
-    }
-
-    if s.picker > 0.0 {
-        let centers = dock_swatch_centers(s.layout, s.mag, s.center, s.picker);
-        draw_swatch_tray(g, &centers, s.picker, p);
-        let dirs = vec![s.layout.outward(); centers.len()];
-        draw_swatches(g, &centers, &dirs, s.picker, s.theme, s.picker_hover, s.size);
     }
     if let Some((from, pos)) = s.drag {
         let size = dock_layout::ICON * 1.1;
         let r = RectF::new(pos.x - size / 2.0, pos.y - size / 2.0, size, size);
         draw_tile(g, &s.tiles[from], r, 2.0);
     } else if let Some(i) = s.tooltip {
-        let text = match s.layout.slots()[i] {
-            Slot::Tile(t) => s.tiles[t].label.as_str(),
-            Slot::Add => "항목 추가",
-            Slot::Palette => "테마",
-            Slot::Menu => "메뉴",
-        };
-        let r = s.layout.slot_rect(s.mag, s.center, i);
-        draw_dock_tooltip(g, text, r, s.layout.edge, s.size);
+        let text = dock_tooltip_text(s.layout, s.tiles, i);
+        let icon = s.layout.slot_rect(s.mag, s.center, i);
+        draw_tooltip_box(g, text, dock_tooltip_rect(g, text, icon, s.layout.edge, s.size));
     }
 }
 
@@ -577,7 +525,7 @@ mod tests {
             },
             TileView {
                 id: "2".into(),
-                label: "아침 뉴스".into(),
+                label: "아침 뉴스 라이브 - 오늘의 주요 소식 모아 보기 (전체 재생목록)".into(),
                 badge: "뉴스".into(),
                 kind: TileKind::Youtube,
                 ..Default::default()
@@ -606,9 +554,9 @@ mod tests {
             let max = layout.max_length();
             let vertical = dock_layout::is_vertical(edge);
             let (w, h) = if vertical {
-                (dock_layout::THICK + dock_layout::HEADROOM, max + 2.0 * dock_layout::SIDE_ROOM)
+                (dock_layout::THICK + layout.headroom(), max + 2.0 * dock_layout::SIDE_ROOM)
             } else {
-                (max + 2.0 * dock_layout::SIDE_ROOM, dock_layout::THICK + dock_layout::HEADROOM)
+                (max + 2.0 * dock_layout::SIDE_ROOM, dock_layout::THICK + layout.headroom())
             };
             let center =
                 if vertical { (dock_layout::THICK / 2.0, h / 2.0) } else { (w / 2.0, h - dock_layout::THICK / 2.0) };
@@ -623,12 +571,7 @@ mod tests {
                 tiles: &tiles,
                 pressed: None,
                 tooltip: Some(1),
-                menu_hover: false,
-                palette_hover: false,
                 drag: None,
-                picker: if vertical { 1.0 } else { 0.0 },
-                picker_hover: if vertical { Some(2) } else { None },
-                theme: Theme::Glass,
             };
             gfx.begin();
             draw_dock(&gfx, &state);

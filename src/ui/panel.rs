@@ -16,7 +16,7 @@ use crate::ui::layout::{
     EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, Hit, MIN_H, MIN_W, PanelLayout, Pt, RectF, SWATCH,
     default_panel_rect, is_visible_on_any, reorder,
 };
-use crate::ui::scene::{self, DockScene, DragView, SceneState, TileView, dock_swatch_centers};
+use crate::ui::scene::{self, DockScene, DragView, SceneState, TileView};
 use crate::ui::theme::{self, PICKER_ORDER, Palette};
 use crate::win::desktop::{self, PxRect};
 use crate::win::dwm;
@@ -367,7 +367,7 @@ impl Panel {
         d.content_px = dock_layout::content_rect(
             widest,
             d.edge,
-            (dock_layout::HEADROOM * s).round() as i32,
+            (d.layout.headroom() * s).round() as i32,
             (dock_layout::SIDE_ROOM * s).round() as i32,
         );
         let content = d.content_px;
@@ -412,13 +412,25 @@ impl Panel {
             DockEdge::Right => RectF::new(bar.x - extra, bar.y, bar.w + extra, bar.h),
         };
         let mut rects = vec![px(outward)];
-        if self.picker_open {
-            let (w, h) = (self.dock.content_px.2, self.dock.content_px.3);
-            rects.push((0, 0, w, h));
+        // 말풍선은 판보다 넓거나 옆으로 길 수 있으므로 그 사각형을 따로 넣는다 (안 넣으면 잘린다)
+        if let Some(r) = self.dock_tooltip_rect(&m) {
+            rects.push(px(RectF::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0)));
         }
         if let Some(region) = region_from(&rects) {
             let _ = unsafe { SetWindowRgn(self.content, Some(region), true) };
         }
+    }
+
+    fn dock_size(&self) -> (f32, f32) {
+        (self.dock.content_px.2 as f32 / self.scale, self.dock.content_px.3 as f32 / self.scale)
+    }
+
+    fn dock_tooltip_rect(&self, m: &Magnified) -> Option<RectF> {
+        let (gfx, i) = (self.gfx.as_ref()?, self.dock_tooltip()?);
+        let layout = &self.dock.layout;
+        let text = scene::dock_tooltip_text(layout, &self.tiles, i);
+        let icon = layout.slot_rect(m, self.dock_center(), i);
+        Some(scene::dock_tooltip_rect(gfx, text, icon, layout.edge, self.dock_size()))
     }
 
     fn dock_tooltip(&self) -> Option<usize> {
@@ -474,18 +486,13 @@ impl Panel {
                     layout: &d.layout,
                     mag: &m,
                     center: self.dock_center(),
-                    size: (d.content_px.2 as f32 / self.scale, d.content_px.3 as f32 / self.scale),
+                    size: self.dock_size(),
                     palette: self.palette(),
                     acrylic: self.acrylic,
                     tiles: &self.tiles,
                     pressed,
                     tooltip: self.dock_tooltip(),
-                    menu_hover: self.hover_hit == Hit::Menu,
-                    palette_hover: self.hover_hit == Hit::Palette,
                     drag: self.drag,
-                    picker,
-                    picker_hover: self.picker_hover,
-                    theme: self.theme,
                 };
                 scene::draw_dock(gfx, &state);
             }
@@ -569,14 +576,11 @@ impl Panel {
         }
     }
 
+    /// 테마 선택기는 패널에만 있다 (독은 트레이 메뉴에서 테마를 고른다)
     fn swatch_centers(&self) -> Vec<Pt> {
-        let progress = self.picker.progress();
         match self.mode {
-            Mode::Panel => self.layout.swatch_centers(PICKER_ORDER.len(), progress),
-            Mode::Dock => {
-                let m = self.dock_mag();
-                dock_swatch_centers(&self.dock.layout, &m, self.dock_center(), progress)
-            }
+            Mode::Panel => self.layout.swatch_centers(PICKER_ORDER.len(), self.picker.progress()),
+            Mode::Dock => Vec::new(),
         }
     }
 
