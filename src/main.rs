@@ -6,6 +6,7 @@
 mod autostart;
 mod config;
 mod items;
+mod updater;
 mod win;
 
 fn main() {}
