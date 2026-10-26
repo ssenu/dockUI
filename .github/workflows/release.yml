@@ -15,24 +15,27 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
-      - name: Install dependencies
-        run: python -m pip install -e ".[dev]"
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
       - name: Test
-        run: python -m pytest -q
+        run: cargo test --locked
       - name: Set version from tag
         env:
           TAG: ${{ github.ref_name }}
         run: |
           $version = $env:TAG.TrimStart("v")
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "잘못된 태그 형식: $env:TAG" }
-          $file = "src/yt_launcher/version.py"
-          (Get-Content $file -Raw) -replace '__version__ = "[^"]*"', "__version__ = `"$version`"" |
-            Set-Content $file -Encoding utf8NoBOM -NoNewline
-          python -c "import sys; sys.path.insert(0, 'src'); import yt_launcher.version as v; assert v.__version__ == sys.argv[1], v.__version__" $version
-          if ($LASTEXITCODE -ne 0) { throw "version.py 갱신 확인 실패" }
+          # Cargo.toml [package] 버전을 태그에 맞춘다 (첫 번째 version 줄)
+          $file = "Cargo.toml"
+          $text = Get-Content $file -Raw
+          $regex = [regex]'(?m)^version = "[^"]*"'
+          $text = $regex.Replace($text, "version = `"$version`"", 1)
+          Set-Content $file $text -Encoding utf8NoBOM -NoNewline
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $actual = ($meta.packages | Where-Object name -eq "yt-launcher").version
+          if ($actual -ne $version) { throw "Cargo.toml 버전 반영 실패: $actual" }
           "APP_VERSION=$version" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
       - name: Install Inno Setup
         run: |
@@ -40,7 +43,14 @@ jobs:
             choco install innosetup -y --no-progress
           }
       - name: Build installer
-        run: ./scripts/build.ps1 -Version $env:APP_VERSION -Python python
+        run: ./scripts/build.ps1 -Version $env:APP_VERSION
+      - name: Check asset names
+        run: |
+          $dir = "dist/installer"
+          $setup = "YT-Launcher-Setup-$env:APP_VERSION.exe"
+          if (-not (Test-Path "$dir/$setup")) { throw "설치 파일 이름이 규칙과 다릅니다" }
+          $line = (Get-Content "$dir/SHA256SUMS.txt" -Raw).Trim()
+          if ($line -notmatch "^[0-9a-f]{64}  $([regex]::Escape($setup))$") { throw "SHA256SUMS.txt 형식 오류: $line" }
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
