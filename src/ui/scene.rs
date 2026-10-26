@@ -4,7 +4,7 @@ use crate::config::DockEdge;
 use crate::config::Theme;
 use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
 use crate::ui::gfx::{Align, Gfx, Weight};
-use crate::ui::layout::{PANEL_HOVER_SCALE, PICKER_RADIUS, PanelLayout, Pt, RectF, SWATCH, fan_points};
+use crate::ui::layout::{PANEL_HOVER_SCALE, PanelLayout, Pt, RectF, SWATCH};
 use crate::ui::theme::{ACCENT, Color, FALLBACK_ALPHA, PICKER_ORDER, Palette, TOOLTIP_BG, TOOLTIP_TEXT};
 use std::path::PathBuf;
 
@@ -146,26 +146,42 @@ fn dock_dot_direction(edge: DockEdge) -> (f32, f32) {
 }
 
 fn draw_add(g: &Gfx, r: RectF, p: &Palette) {
-    g.fill_round_rect(r, ICON_RADIUS * r.w / 56.0, p.add_tile);
+    let radius = ICON_RADIUS * r.w / 56.0;
+    g.fill_round_rect(r, radius, p.add_tile);
+    let inner = RectF::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0);
+    g.stroke_round_rect(inner, radius - 0.5, p.divider, 1.0);
     let c = r.center();
-    let arm = r.w * 0.16;
-    let plus = Color::hex(0xFFFFFF, 0.92);
-    g.line(Pt { x: c.x - arm, y: c.y }, Pt { x: c.x + arm, y: c.y }, plus, 2.6);
-    g.line(Pt { x: c.x, y: c.y - arm }, Pt { x: c.x, y: c.y + arm }, plus, 2.6);
+    let arm = r.w * 0.15;
+    let width = 2.4 * r.w / 56.0;
+    g.line(Pt { x: c.x - arm, y: c.y }, Pt { x: c.x + arm, y: c.y }, p.subtext, width);
+    g.line(Pt { x: c.x, y: c.y - arm }, Pt { x: c.x, y: c.y + arm }, p.subtext, width);
 }
 
-/// 원 안에 선으로 그린 팔레트 (엄지 구멍 + 물감 자리 3개)
-fn draw_palette_button(g: &Gfx, r: RectF, p: &Palette, hover: bool) {
+/// 둥근 보조 버튼 바탕. `floating`이면 그림자 있는 떠 있는 버튼(패널), 아니면 판에 붙은 납작한 버튼(독).
+fn draw_round_button(g: &Gfx, c: Pt, radius: f32, p: &Palette, hover: bool, floating: bool) {
+    if floating {
+        g.soft_shadow(RectF::new(c.x - radius, c.y - radius, radius * 2.0, radius * 2.0), radius, 0.8);
+        let face = p.tint.with_alpha(1.0).shade(if p.dark_backdrop { 0.10 } else { -0.03 });
+        g.fill_circle(c, radius, if hover { face.shade(0.06) } else { face });
+    } else {
+        g.fill_circle(c, radius, p.text.with_alpha(if hover { 0.16 } else { 0.08 }));
+    }
+    g.stroke_circle(c, radius - 0.5, p.divider, 1.0);
+}
+
+/// 원 안에 그린 팔레트: 테두리 + 엄지 구멍 + 물감 네 방울
+fn draw_palette_button(g: &Gfx, r: RectF, p: &Palette, hover: bool, floating: bool) {
     let c = r.center();
     let radius = r.w / 2.0;
-    g.soft_shadow(RectF::new(c.x - radius, c.y - radius, radius * 2.0, radius * 2.0), radius, 0.8);
-    let face = p.tint.with_alpha(1.0).shade(if p.dark_backdrop { 0.10 } else { -0.03 });
-    g.fill_circle(c, radius, if hover { face.shade(0.06) } else { face });
-    g.stroke_circle(c, radius - 0.5, p.divider, 1.0);
-    g.stroke_circle(c, radius * 0.45, p.text, 1.8);
-    g.fill_circle(Pt { x: c.x + radius * 0.22, y: c.y + radius * 0.22 }, radius * 0.13, face);
-    for (dx, dy) in [(-0.2f32, -0.06f32), (-0.04, -0.24), (0.16, -0.16)] {
-        g.fill_circle(Pt { x: c.x + dx * radius, y: c.y + dy * radius }, radius * 0.07, p.text);
+    draw_round_button(g, c, radius, p, hover, floating);
+    let body = radius * 0.54;
+    g.stroke_circle(c, body, p.text, 1.6);
+    g.stroke_circle(Pt { x: c.x + body * 0.42, y: c.y + body * 0.42 }, body * 0.2, p.text, 1.4);
+    const PAINTS: [u32; 4] = [0xE53935, 0xFBC02D, 0x43A047, 0x1E88E5];
+    for (k, rgb) in PAINTS.iter().enumerate() {
+        let a = (110.0 + 55.0 * k as f32).to_radians();
+        let at = Pt { x: c.x + body * 0.55 * a.cos(), y: c.y + body * 0.55 * a.sin() };
+        g.fill_circle(at, body * 0.17, Color::hex(*rgb, 1.0));
     }
 }
 
@@ -187,6 +203,13 @@ fn draw_header(g: &Gfx, s: &SceneState) {
     g.line(Pt { x: h.x, y: h.bottom() }, Pt { x: h.right(), y: h.bottom() }, p.divider, 1.0);
 }
 
+/// 말풍선 상자. 어두운 배경(투명 테마)에서도 경계가 보이게 옅은 테두리를 두른다.
+fn draw_tooltip_box(g: &Gfx, text: &str, r: RectF) {
+    g.fill_round_rect(r, 8.0, TOOLTIP_BG);
+    g.stroke_round_rect(RectF::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0), 7.5, Color::hex(0xFFFFFF, 0.14), 1.0);
+    g.text(text, r, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
+}
+
 /// 아이콘 위에 말풍선을 띄운다. 위쪽이 `top_limit`보다 올라가면(헤더를 가리면) 아래에 띄운다.
 fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limit: f32) {
     let w = g.measure(text, 12.0, Weight::SemiBold) + 20.0;
@@ -198,41 +221,71 @@ fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limi
         y = anchor.bottom() + 8.0;
     }
     let r = RectF::new(x, y, w, h);
-    g.fill_round_rect(r, 8.0, TOOLTIP_BG);
-    g.text(text, r, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
+    draw_tooltip_box(g, text, r);
 }
 
-/// 테마 색 원들 (패널·독 공용). `progress`는 펼침 정도 0..1.
+/// 원(중심 c, 반지름 r)에서 `dir` 방향으로 떨어진 곳에 말풍선을 띄운다 (이웃 원을 가리지 않게).
+fn draw_tooltip_toward(g: &Gfx, text: &str, c: Pt, r: f32, dir: (f32, f32), bounds: (f32, f32)) {
+    let w = g.measure(text, 12.0, Weight::SemiBold) + 20.0;
+    let h = 26.0;
+    // 상자 가운데에서 dir 방향으로 상자 테두리까지 거리
+    let half = match (dir.0.abs() > 1e-3, dir.1.abs() > 1e-3) {
+        (true, true) => (w / 2.0 / dir.0.abs()).min(h / 2.0 / dir.1.abs()),
+        (true, false) => w / 2.0,
+        _ => h / 2.0,
+    };
+    let d = r + 8.0 + half;
+    let x = (c.x + dir.0 * d - w / 2.0).clamp(4.0, (bounds.0 - w - 4.0).max(4.0));
+    let y = (c.y + dir.1 * d - h / 2.0).clamp(4.0, (bounds.1 - h - 4.0).max(4.0));
+    let rect = RectF::new(x, y, w, h);
+    draw_tooltip_box(g, text, rect);
+}
+
+/// 테마 색 원들 (패널·독 공용). `progress`는 펼침 정도 0..1, `tip_dirs`는 원마다 말풍선을 띄울 방향.
 fn draw_swatches(
     g: &Gfx,
     centers: &[Pt],
+    tip_dirs: &[(f32, f32)],
     progress: f32,
-    palette: &Palette,
     current: Theme,
     hover: Option<usize>,
     bounds: (f32, f32),
 ) {
-    let radius = SWATCH / 2.0 * (0.6 + 0.4 * progress);
+    let base = SWATCH / 2.0 * (0.6 + 0.4 * progress);
+    let hover = hover.filter(|_| progress >= 1.0);
     for (i, (theme, c)) in PICKER_ORDER.iter().zip(centers.iter()).enumerate() {
+        let radius = if hover == Some(i) { base * 1.08 } else { base };
         let swatch = crate::ui::theme::palette(*theme);
-        g.fill_circle(*c, radius + 4.0, palette.text.with_alpha(0.25));
+        g.soft_shadow(RectF::new(c.x - radius, c.y - radius, radius * 2.0, radius * 2.0), radius, 0.7);
         g.fill_circle(*c, radius, swatch.swatch);
+        // 밝은 원도 배경과 구분되게 안쪽에 옅은 테두리
+        let rim = if swatch.dark_backdrop { Color::hex(0xFFFFFF, 0.28) } else { Color::hex(0x000000, 0.14) };
+        g.stroke_circle(*c, radius - 0.5, rim, 1.0);
         if *theme == current {
-            g.stroke_circle(*c, radius, ACCENT, 2.5);
-        } else {
-            g.stroke_circle(*c, radius, palette.divider.with_alpha(0.6), 1.2);
+            g.stroke_circle(*c, radius + 3.5, ACCENT, 2.0);
         }
-        if hover == Some(i) && progress >= 1.0 {
-            let anchor = RectF::new(c.x - radius, c.y - radius, radius * 2.0, radius * 2.0);
-            draw_tooltip(g, crate::ui::theme::label(*theme), anchor, bounds, 6.0);
-        }
+    }
+    if let Some(i) = hover
+        && let (Some(theme), Some(c), Some(dir)) = (PICKER_ORDER.get(i), centers.get(i), tip_dirs.get(i))
+    {
+        draw_tooltip_toward(g, crate::ui::theme::label(*theme), *c, base * 1.08 + 3.5, *dir, bounds);
     }
 }
 
 fn draw_picker(g: &Gfx, s: &SceneState) {
     let centers = s.layout.swatch_centers(PICKER_ORDER.len(), s.picker);
+    let anchor = s.layout.palette_button.center();
+    // 부채꼴 바깥쪽(팔레트 버튼에서 멀어지는 쪽)
+    let dirs: Vec<(f32, f32)> = centers
+        .iter()
+        .map(|c| {
+            let (dx, dy) = (c.x - anchor.x, c.y - anchor.y);
+            let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+            (dx / len, dy / len)
+        })
+        .collect();
     let bounds = (s.layout.width, s.layout.height);
-    draw_swatches(g, &centers, s.picker, &s.palette, s.theme, s.picker_hover, bounds);
+    draw_swatches(g, &centers, &dirs, s.picker, s.theme, s.picker_hover, bounds);
 }
 
 /// 드래그 중이면 놓일 자리 기준으로 항목 순서를 바꿔 보여준다.
@@ -269,7 +322,7 @@ pub fn draw(g: &Gfx, s: &SceneState) {
     let add_slot = s.tiles.len();
     let add_level = s.hover.get(add_slot).copied().unwrap_or(0.0);
     draw_add(g, s.layout.add_cell().scaled(1.0 + (PANEL_HOVER_SCALE - 1.0) * add_level), p);
-    draw_palette_button(g, s.layout.palette_button, p, s.palette_hover);
+    draw_palette_button(g, s.layout.palette_button, p, s.palette_hover, true);
 
     if s.picker > 0.0 {
         draw_picker(g, s);
@@ -321,23 +374,37 @@ fn draw_dock_tooltip(g: &Gfx, text: &str, icon: RectF, edge: DockEdge, bounds: (
     let x = x.clamp(4.0, (bounds.0 - w - 4.0).max(4.0));
     let y = y.clamp(4.0, (bounds.1 - h - 4.0).max(4.0));
     let r = RectF::new(x, y, w, h);
-    g.fill_round_rect(r, 8.0, TOOLTIP_BG);
-    g.text(text, r, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
+    draw_tooltip_box(g, text, r);
 }
 
 fn draw_dots(g: &Gfx, r: RectF, p: &Palette, hover: bool) {
     let c = r.center();
-    g.fill_circle(c, r.w * 0.42, p.text.with_alpha(if hover { 0.16 } else { 0.08 }));
-    let step = r.w * 0.15;
+    draw_round_button(g, c, r.w / 2.0, p, hover, false);
+    let step = r.w * 0.17;
     for dx in [-step, 0.0, step] {
-        g.fill_circle(Pt { x: c.x + dx, y: c.y }, r.w * 0.05, p.text);
+        g.fill_circle(Pt { x: c.x + dx, y: c.y }, r.w * 0.055, p.text);
     }
 }
 
-/// 테마 선택 원 중심 (독): 팔레트 칸에서 화면 안쪽으로 부채꼴
+/// 테마 선택 원 중심 (독): 팔레트 칸 바깥쪽에 판과 나란히 한 줄
 pub fn dock_swatch_centers(layout: &DockLayout, mag: &Magnified, center: (f32, f32), progress: f32) -> Vec<Pt> {
-    let anchor = layout.slot_rect(mag, center, layout.tiles + 1).center();
-    fan_points(anchor, layout.picker_angles(), PICKER_ORDER.len(), PICKER_RADIUS * progress)
+    layout.swatch_row(mag, center, layout.tiles + 1, PICKER_ORDER.len(), progress)
+}
+
+/// 독 테마 선택 원 뒤에 까는 받침 판 (펼침 정도만큼 나타난다)
+fn draw_swatch_tray(g: &Gfx, centers: &[Pt], progress: f32, p: &Palette) {
+    let (Some(first), Some(last)) = (centers.first(), centers.last()) else { return };
+    let pad = SWATCH / 2.0 + 12.0;
+    let r = RectF::new(
+        first.x.min(last.x) - pad,
+        first.y.min(last.y) - pad,
+        (last.x - first.x).abs() + 2.0 * pad,
+        (last.y - first.y).abs() + 2.0 * pad,
+    );
+    let fade = progress.clamp(0.0, 1.0);
+    g.soft_shadow(r, pad, 1.2 * fade);
+    g.fill_round_rect(r, pad, p.tint.with_alpha(FALLBACK_ALPHA * fade));
+    g.stroke_round_rect(r, pad, p.divider.with_alpha(p.divider.a * fade), 1.0);
 }
 
 pub fn draw_dock(g: &Gfx, s: &DockScene) {
@@ -377,14 +444,16 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
                 }
             }
             Slot::Add => draw_add(g, r, p),
-            Slot::Palette => draw_palette_button(g, r.scaled(0.84), p, s.palette_hover),
-            Slot::Menu => draw_dots(g, r, p, s.menu_hover),
+            Slot::Palette => draw_palette_button(g, r.scaled(0.84), p, s.palette_hover, false),
+            Slot::Menu => draw_dots(g, r.scaled(0.84), p, s.menu_hover),
         }
     }
 
     if s.picker > 0.0 {
         let centers = dock_swatch_centers(s.layout, s.mag, s.center, s.picker);
-        draw_swatches(g, &centers, s.picker, p, s.theme, s.picker_hover, s.size);
+        draw_swatch_tray(g, &centers, s.picker, p);
+        let dirs = vec![s.layout.outward(); centers.len()];
+        draw_swatches(g, &centers, &dirs, s.picker, s.theme, s.picker_hover, s.size);
     }
     if let Some((from, pos)) = s.drag {
         let size = dock_layout::ICON * 1.1;
@@ -558,7 +627,7 @@ mod tests {
                 palette_hover: false,
                 drag: None,
                 picker: if vertical { 1.0 } else { 0.0 },
-                picker_hover: None,
+                picker_hover: if vertical { Some(2) } else { None },
                 theme: Theme::Glass,
             };
             gfx.begin();

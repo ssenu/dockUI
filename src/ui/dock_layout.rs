@@ -4,7 +4,7 @@
 //! `across`는 그에 수직인 방향으로 판 안에서의 위치(0..두께)다.
 
 use crate::config::DockEdge;
-use crate::ui::layout::{Hit, RectF};
+use crate::ui::layout::{Hit, Pt, RectF, SWATCH};
 
 pub const ICON: f32 = 48.0;
 pub const GAP: f32 = 10.0;
@@ -20,7 +20,11 @@ pub const RANGE: f32 = 2.5 * (ICON + GAP);
 /// 구분선 칸 너비 (가운데에 1px 선)
 pub const SEPARATOR: f32 = GAP;
 /// 콘텐츠 창이 판 바깥(화면 안쪽)으로 더 차지하는 여유: 확대 + 말풍선 + 테마 선택기
-pub const HEADROOM: f32 = 110.0;
+pub const HEADROOM: f32 = 130.0;
+/// 테마 선택 원 사이 간격
+pub const SWATCH_GAP: f32 = 10.0;
+/// 판 바깥 면에서 테마 선택 원 줄까지 띄우는 거리
+pub const SWATCH_LIFT: f32 = 16.0;
 /// 콘텐츠 창이 판 양 끝으로 더 차지하는 여유 (확대로 늘어나는 길이 + 선택기)
 pub const SIDE_ROOM: f32 = 90.0;
 
@@ -143,14 +147,31 @@ impl DockLayout {
         }
     }
 
-    /// 테마 선택기 부채꼴 각도 범위 (도). 판에서 화면 안쪽으로 펼친다.
-    pub fn picker_angles(&self) -> (f32, f32) {
+    /// 화면 안쪽(판에서 멀어지는 쪽) 단위 벡터
+    pub fn outward(&self) -> (f32, f32) {
         match self.edge {
-            DockEdge::Bottom => (-30.0, -150.0),
-            DockEdge::Top => (30.0, 150.0),
-            DockEdge::Left => (-60.0, 60.0),
-            DockEdge::Right => (-120.0, -240.0),
+            DockEdge::Bottom => (0.0, -1.0),
+            DockEdge::Top => (0.0, 1.0),
+            DockEdge::Left => (1.0, 0.0),
+            DockEdge::Right => (-1.0, 0.0),
         }
+    }
+
+    /// 테마 선택 원 중심: `slot` 칸 바깥쪽에 판과 나란히 한 줄. `progress`(0..1)만큼 칸 중심에서 펼쳐진다.
+    pub fn swatch_row(&self, m: &Magnified, center: (f32, f32), slot: usize, count: usize, progress: f32) -> Vec<Pt> {
+        let (ox, oy) = self.outward();
+        let (ax, ay) = (oy.abs(), ox.abs());
+        let along = m.centers[slot];
+        let anchor = Pt { x: center.0 + ax * along, y: center.1 + ay * along };
+        let lift = THICK / 2.0 + SWATCH_LIFT + SWATCH / 2.0;
+        let step = SWATCH + SWATCH_GAP;
+        let first = -(count.saturating_sub(1) as f32) * step / 2.0;
+        (0..count)
+            .map(|i| {
+                let a = first + i as f32 * step;
+                Pt { x: anchor.x + progress * (ox * lift + ax * a), y: anchor.y + progress * (oy * lift + ay * a) }
+            })
+            .collect()
     }
 }
 
@@ -292,15 +313,32 @@ mod tests {
     }
 
     #[test]
-    fn picker_fans_away_from_edge() {
-        let up = DockLayout::compute(DockEdge::Bottom, 0).picker_angles();
-        assert!(up.0.to_radians().sin() < 0.0 && up.1.to_radians().sin() < 0.0);
-        let down = DockLayout::compute(DockEdge::Top, 0).picker_angles();
-        assert!(down.0.to_radians().sin() > 0.0);
-        let right = DockLayout::compute(DockEdge::Left, 0).picker_angles();
-        assert!(right.0.to_radians().cos() > 0.0 && right.1.to_radians().cos() > 0.0);
-        let left = DockLayout::compute(DockEdge::Right, 0).picker_angles();
-        assert!(left.0.to_radians().cos() < 0.0 && left.1.to_radians().cos() < 0.0);
+    fn swatches_line_up_outside_the_bar() {
+        let center = (300.0, 200.0);
+        for edge in [DockEdge::Bottom, DockEdge::Top, DockEdge::Left, DockEdge::Right] {
+            let l = DockLayout::compute(edge, 2);
+            let m = l.magnified(None, 0.0);
+            let bar = l.bar_rect(&m, center);
+            let palette = l.slot_rect(&m, center, 3).center();
+            let row = l.swatch_row(&m, center, 3, 4, 1.0);
+            let r = SWATCH / 2.0;
+            for p in &row {
+                let clear = match edge {
+                    DockEdge::Bottom => p.y + r < bar.y,
+                    DockEdge::Top => p.y - r > bar.bottom(),
+                    DockEdge::Left => p.x - r > bar.right(),
+                    DockEdge::Right => p.x + r < bar.x,
+                };
+                assert!(clear, "{edge:?}: 판과 겹치지 않음");
+            }
+            // 팔레트 칸을 가운데로 나란히, 서로 겹치지 않게
+            let mid = Pt { x: (row[0].x + row[3].x) / 2.0, y: (row[0].y + row[3].y) / 2.0 };
+            let (ox, oy) = l.outward();
+            assert!(((mid.x - palette.x) * oy).abs() < 0.01 && ((mid.y - palette.y) * ox).abs() < 0.01);
+            let d = ((row[1].x - row[0].x).powi(2) + (row[1].y - row[0].y).powi(2)).sqrt();
+            assert!(d >= SWATCH + SWATCH_GAP - 0.01);
+            assert!(l.swatch_row(&m, center, 3, 4, 0.0).iter().all(|p| *p == palette));
+        }
     }
 
     #[test]

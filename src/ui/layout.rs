@@ -41,11 +41,13 @@ pub const PADDING: f32 = 14.0;
 pub const HEADER_H: f32 = 40.0;
 pub const ICON: f32 = 56.0;
 pub const GAP: f32 = 16.0;
+/// 남는 폭을 나눠 가질 때 칸 간격의 상한
+pub const MAX_GAP: f32 = 28.0;
 pub const EDGE: f32 = 6.0;
 pub const MENU_BUTTON: f32 = 28.0;
 pub const PALETTE_BUTTON: f32 = 40.0;
 pub const PANEL_HOVER_SCALE: f32 = 1.15;
-pub const PICKER_RADIUS: f32 = 70.0;
+pub const PICKER_RADIUS: f32 = 84.0;
 pub const SWATCH: f32 = 34.0;
 pub const MIN_W: f32 = 240.0;
 pub const MIN_H: f32 = 200.0;
@@ -98,13 +100,21 @@ impl PanelLayout {
             PALETTE_BUTTON,
             PALETTE_BUTTON,
         );
-        let top = header.bottom() + 12.0;
-        let usable = (width - 2.0 * PADDING + GAP).max(ICON + GAP);
-        let columns = ((usable / (ICON + GAP)).floor() as usize).max(1);
+        let top = header.bottom() + 14.0;
+        let inner = width - 2.0 * PADDING;
+        let columns = ((((inner + GAP).max(ICON + GAP)) / (ICON + GAP)).floor() as usize).max(1);
+        // 남는 폭은 간격으로 나누고(상한 MAX_GAP), 그래도 남으면 가운데 정렬
+        let gap = if columns > 1 {
+            ((inner - columns as f32 * ICON) / (columns - 1) as f32).clamp(GAP, MAX_GAP)
+        } else {
+            GAP
+        };
+        let grid_w = columns as f32 * ICON + (columns - 1) as f32 * gap;
+        let left = PADDING + ((inner - grid_w) / 2.0).max(0.0);
         let cells = (0..=items)
             .map(|i| {
                 let (row, col) = (i / columns, i % columns);
-                RectF::new(PADDING + col as f32 * (ICON + GAP), top + row as f32 * (ICON + GAP), ICON, ICON)
+                RectF::new(left + col as f32 * (ICON + gap), top + row as f32 * (ICON + gap), ICON, ICON)
             })
             .collect();
         PanelLayout { width, height, header, menu_button, palette_button, cells }
@@ -235,14 +245,17 @@ mod tests {
     #[test]
     fn grid_wraps_by_width_and_add_is_last() {
         let l = PanelLayout::compute(360.0, 480.0, 5);
-        // (360 - 28 + 16) / 72 = 4.83 → 4열
+        // (360 - 28 + 16) / 72 = 4.83 → 4열, 남는 폭으로 간격 28(상한), 좌우 여백 같게
         assert_eq!(l.cells.len(), 6);
-        assert_eq!(l.cells[0].x, PADDING);
-        assert_eq!(l.cells[3].x, PADDING + 3.0 * 72.0);
-        assert_eq!(l.cells[4].y, l.cells[0].y + 72.0);
+        let step = ICON + MAX_GAP;
+        assert_eq!(l.cells[3].x, l.cells[0].x + 3.0 * step);
+        assert!((l.cells[0].x - PADDING - (360.0 - PADDING - l.cells[3].right())).abs() < 0.01, "가운데 정렬");
+        assert_eq!(l.cells[4].y, l.cells[0].y + step);
+        assert_eq!(l.cells[4].x, l.cells[0].x);
         assert_eq!(l.add_cell(), l.cells[5]);
         let narrow = PanelLayout::compute(100.0, 300.0, 2);
-        assert_eq!(narrow.cells[1].x, PADDING);
+        assert_eq!(narrow.cells[1].x, narrow.cells[0].x);
+        assert_eq!(narrow.cells[0].x, (100.0 - ICON) / 2.0);
     }
 
     #[test]
