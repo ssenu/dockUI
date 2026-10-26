@@ -27,7 +27,7 @@ pub const SIDE_HEADROOM: f32 = ICON * (1.0 + MAGNIFY) - ICON + 8.0 + TOOLTIP_MAX
 pub const SIDE_ROOM: f32 = 90.0;
 /// 판 끝 "by ssenu" 글자 칸: 가로 독은 폭, 세로 독은 높이 (DIP)
 pub const CREDIT_W: f32 = 36.0;
-pub const CREDIT_H: f32 = 30.0;
+pub const CREDIT_H: f32 = 18.0;
 
 /// 이 가장자리 독에서 글자 칸이 판 길이 방향으로 차지하는 길이
 pub fn credit_len(edge: DockEdge) -> f32 {
@@ -339,6 +339,7 @@ mod tests {
         let e = DockLayout::compute(DockEdge::Left, 2, true);
         assert!(e.credit > *e.rest.last().unwrap());
         assert_eq!(credit_len(DockEdge::Left), CREDIT_H);
+        const { assert!(CREDIT_H < 20.0, "세로 독은 한 줄") };
         assert_eq!(credit_len(DockEdge::Bottom), CREDIT_W);
     }
 
