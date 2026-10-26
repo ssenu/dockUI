@@ -840,6 +840,8 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::{HSTRING, PCWSTR};
 
+// HKEY_LOCAL_MACHINE은 크롬 경로 탐색(Task 6)에서 쓰기 시작한다. Task 6에서 이 allow 두 줄을 지운다.
+#[allow(unused_imports)]
 pub use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
 fn wide(s: &str) -> Vec<u16> {
@@ -1627,7 +1629,7 @@ pub mod shell;
 pub mod windows;
 ```
 
-- [ ] **Step 2: src/win/windows.rs (구현 + 테스트)**
+- [ ] **Step 2: src/win/windows.rs (구현 + 테스트)** (같은 단계에서 src/win/reg.rs의 Task 4 임시 allow 두 줄을 지운다)
 
 ```rust
 //! 최상위 창 목록, 창 최대화·복원·전면화.
