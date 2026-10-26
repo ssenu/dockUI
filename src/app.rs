@@ -53,6 +53,8 @@ const FIRST_CHECK_MS: u32 = 30_000;
 const DAILY_CHECK_MS: u32 = 24 * 60 * 60 * 1000;
 const CLICK_DEBOUNCE: Duration = Duration::from_secs(1);
 
+/// 새 버전이 있을 때 목록 끝에 붙는 업데이트 단추의 id (항목 id와 겹치지 않는다)
+const UPDATE_TILE_ID: &str = "__update__";
 const CMD_SHOW: u32 = 20;
 const CMD_ADD: u32 = 23;
 /// 테마 고르기: CMD_THEME + PICKER_ORDER 번호
@@ -222,6 +224,16 @@ unsafe extern "system" fn on_window_event(
     }
 }
 
+/// 새 버전 업데이트 단추. 내려받는 중이면 배지·이름으로 알린다.
+fn update_tile(version: &str, downloading: bool) -> TileView {
+    let (label, badge) = if downloading {
+        ("업데이트 내려받는 중…".to_string(), "받는 중".to_string())
+    } else {
+        (format!("새 버전 v{version} 설치"), format!("v{version}"))
+    };
+    TileView { id: UPDATE_TILE_ID.to_string(), label, badge, kind: TileKind::Update, ..Default::default() }
+}
+
 /// 화면에서 바뀐 순서(id 목록)대로 항목을 다시 늘어놓는다. 목록에 없는 항목은 뒤에 붙인다.
 pub fn apply_order(items: &[Item], ids: &[String]) -> Vec<Item> {
     let mut rest: Vec<Item> = items.to_vec();
@@ -322,7 +334,11 @@ impl App {
         let dir = self.storage.dir.clone();
         let icon_of = move |id: &str| Some(icon_path(&dir, id)).filter(|p| p.exists());
         let status = TileStatus { icon_of: &icon_of, running: &self.running, missing: &self.missing };
-        tile_views(&self.config.items, &status)
+        let mut tiles = tile_views(&self.config.items, &status);
+        if let Some(release) = &self.release {
+            tiles.push(update_tile(&release.version, self.downloading));
+        }
+        tiles
     }
 
     fn refresh_tiles(&self) {
@@ -471,6 +487,7 @@ impl App {
 
     fn on_ui(&mut self, event: UiEvent) {
         match event {
+            UiEvent::TileClicked(id) if id == UPDATE_TILE_ID => self.install_update(),
             UiEvent::TileClicked(id) => self.open_item(&id),
             UiEvent::AddRequested => self.add_item(),
             UiEvent::EditRequested(id) => self.edit_item(&id),
@@ -587,12 +604,13 @@ impl App {
         match decide_update(&result, CURRENT_VERSION, &self.config.notified_version) {
             UpdateDecision::Available { version, notify } => {
                 self.release = result.ok().flatten();
+                self.refresh_tiles();
                 if notify {
                     self.config.notified_version = version.clone();
                     self.save();
                 }
                 if notify || manual {
-                    self.notify(&format!("새 버전(v{version})이 나왔습니다. 트레이 메뉴에서 설치하세요."));
+                    self.notify(&format!("새 버전(v{version})이 나왔습니다. 목록 끝의 업데이트 단추를 누르세요."));
                 }
             }
             UpdateDecision::UpToDate if manual => self.notify("최신 버전입니다."),
@@ -616,6 +634,7 @@ impl App {
             return;
         }
         self.downloading = true;
+        self.refresh_tiles();
         self.notify("업데이트를 내려받는 중입니다…");
         let send = self.post_event();
         std::thread::spawn(move || {
@@ -634,6 +653,7 @@ impl App {
             Err(e) => {
                 logging::error(&format!("업데이트 실패: {e}"));
                 self.downloading = false;
+                self.refresh_tiles();
                 self.notify(&format!("업데이트에 실패했습니다: {e}"));
             }
         }
@@ -933,6 +953,16 @@ mod tests {
             Item::App { id: "a".into(), name: "x".into(), target: "T".into(), exe: Some(r"C:\x.exe".into()) },
         ];
         assert_eq!(app_keys(&items), vec![None, Some(AppKey { target: "T".into(), exe: Some(r"C:\x.exe".into()) })]);
+    }
+
+    #[test]
+    fn update_tile_shows_version_then_progress() {
+        let t = update_tile("0.3.0", false);
+        assert_eq!((t.id.as_str(), t.kind, t.badge.as_str()), (UPDATE_TILE_ID, TileKind::Update, "v0.3.0"));
+        assert!(t.label.contains("v0.3.0"));
+        let busy = update_tile("0.3.0", true);
+        assert_eq!(busy.badge, "받는 중");
+        assert!(crate::items::new_id() != UPDATE_TILE_ID);
     }
 
     #[test]

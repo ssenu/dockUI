@@ -16,7 +16,7 @@ use crate::ui::layout::{
     EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, Hit, MIN_H, MIN_W, PanelLayout, Pt, RectF, SWATCH,
     default_panel_rect, is_visible_on_any, reorder,
 };
-use crate::ui::scene::{self, DockScene, DragView, SceneState, TileView};
+use crate::ui::scene::{self, DockScene, DragView, SceneState, TileKind, TileView};
 use crate::ui::theme::{self, PICKER_ORDER, Palette};
 use crate::win::desktop::{self, PxRect};
 use crate::win::dwm;
@@ -368,7 +368,7 @@ impl Panel {
             widest,
             d.edge,
             (d.layout.headroom() * s).round() as i32,
-            (dock_layout::SIDE_ROOM * s).round() as i32,
+            (d.layout.side_room() * s).round() as i32,
         );
         let content = d.content_px;
         move_window(self.content, content);
@@ -566,14 +566,20 @@ impl Panel {
         }
     }
 
+    /// 끌어서 옮길 수 있는 항목 수 (끝에 붙는 업데이트 단추는 빼고)
+    fn movable(&self) -> usize {
+        self.tiles.iter().filter(|t| t.kind != TileKind::Update).count()
+    }
+
     fn drop_index(&self, p: Pt) -> usize {
-        match self.mode {
+        let index = match self.mode {
             Mode::Panel => self.layout.drop_index(p),
             Mode::Dock => {
                 let m = self.dock_mag();
                 self.dock.layout.drop_index(self.dock_axes(p, &m).0)
             }
-        }
+        };
+        index.min(self.movable().saturating_sub(1))
     }
 
     /// 테마 선택기는 패널에만 있다 (독은 트레이 메뉴에서 테마를 고른다)
@@ -633,6 +639,7 @@ impl Panel {
         }
         if let Some(press) = &self.press
             && let Hit::Tile(i) = press.hit
+            && self.tiles[i].kind != TileKind::Update
             && self.drag.is_none()
             && ((p.x - press.at.x).powi(2) + (p.y - press.at.y).powi(2)).sqrt() > DRAG_THRESHOLD
         {
@@ -676,7 +683,8 @@ impl Panel {
             let to = self.drop_index(pos);
             if from != to {
                 self.tiles = reorder(&self.tiles, from, to);
-                self.emit(UiEvent::Reordered(self.tiles.iter().map(|t| t.id.clone()).collect()));
+                let ids = self.tiles.iter().filter(|t| t.kind != TileKind::Update).map(|t| t.id.clone()).collect();
+                self.emit(UiEvent::Reordered(ids));
             }
             self.render();
             return;
@@ -719,7 +727,9 @@ impl Panel {
     }
 
     fn on_right_click(&mut self, p: Pt) {
-        if let Hit::Tile(i) = self.hit(p) {
+        if let Hit::Tile(i) = self.hit(p)
+            && self.tiles[i].kind != TileKind::Update
+        {
             let id = self.tiles[i].id.clone();
             let entries = [MenuEntry::item(CMD_EDIT, "수정"), MenuEntry::item(CMD_DELETE, "삭제")];
             match show_popup(self.glass, &entries) {

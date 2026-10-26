@@ -19,6 +19,8 @@ pub enum TileKind {
     Youtube,
     App,
     Web,
+    /// 새 버전이 있을 때 목록 끝에 붙는 업데이트 단추 (끌기·수정·삭제 불가)
+    Update,
 }
 
 /// 화면에 그릴 항목 하나
@@ -27,7 +29,7 @@ pub struct TileView {
     pub id: String,
     /// 말풍선에 보이는 이름
     pub label: String,
-    /// 유튜브 아이콘 아래 두 글자 배지 (다른 종류는 아바타 글자)
+    /// 유튜브 아이콘 아래 두 글자 배지 (업데이트는 버전, 다른 종류는 아바타 글자)
     pub badge: String,
     pub kind: TileKind,
     /// 캐시된 아이콘 PNG (앱 아이콘, 사이트 파비콘). 없으면 글자 아바타
@@ -94,6 +96,31 @@ fn draw_youtube_icon(g: &Gfx, r: RectF, badge: &str) {
     }
 }
 
+/// 업데이트 단추: 초록 타일에 아래 화살표 + 받침, 아래 배지(버전 또는 "받는 중")
+fn draw_update_icon(g: &Gfx, r: RectF, badge: &str) {
+    g.fill_round_rect_gradient(r, ICON_RADIUS * r.w / 56.0, Color::hex(0x3CCB6C, 1.0), Color::hex(0x1A9A4A, 1.0));
+    let c = r.center();
+    let s = r.w / 56.0;
+    let white = Color::hex(0xFFFFFF, 1.0);
+    let top = c.y - 14.0 * s;
+    let tip = c.y + 3.0 * s;
+    g.line(Pt { x: c.x, y: top }, Pt { x: c.x, y: tip - 2.0 * s }, white, 3.2 * s);
+    let head = [
+        Pt { x: c.x - 7.5 * s, y: tip - 7.0 * s },
+        Pt { x: c.x + 7.5 * s, y: tip - 7.0 * s },
+        Pt { x: c.x, y: tip + 1.5 * s },
+    ];
+    g.fill_polygon(&head, white);
+    g.line(Pt { x: c.x - 10.0 * s, y: tip + 5.0 * s }, Pt { x: c.x + 10.0 * s, y: tip + 5.0 * s }, white, 2.6 * s);
+    if !badge.is_empty() {
+        let size = 9.5 * s;
+        let w = g.measure(badge, size, Weight::SemiBold) + 10.0 * s;
+        let pill = RectF::new(c.x - w / 2.0, r.bottom() - 17.0 * s, w, 13.0 * s);
+        g.fill_round_rect(pill, 6.5 * s, Color::hex(0x000000, 0.25));
+        g.text(badge, pill, size, Weight::SemiBold, Align::Center, Color::hex(0xFFFFFF, 0.95));
+    }
+}
+
 fn draw_letter_icon(g: &Gfx, r: RectF, seed: &str, letter: &str) {
     let base = avatar_color(seed);
     g.fill_round_rect_gradient(r, ICON_RADIUS * r.w / 56.0, base.shade(0.12), base.shade(-0.08));
@@ -113,6 +140,7 @@ fn draw_tile(g: &Gfx, tile: &TileView, r: RectF, lift: f32) {
     g.soft_shadow(r, radius, 1.0 + lift);
     match (tile.kind, &tile.icon) {
         (TileKind::Youtube, _) => draw_youtube_icon(g, r, &tile.badge),
+        (TileKind::Update, _) => draw_update_icon(g, r, &tile.badge),
         // 사이트 아이콘은 작아서 흰 둥근 판 위에 올린다
         (TileKind::Web, Some(path)) => {
             g.fill_round_rect(r, radius, Color::hex(0xFFFFFF, 0.96));
@@ -199,9 +227,11 @@ fn draw_header(g: &Gfx, s: &SceneState) {
     g.line(Pt { x: h.x, y: h.bottom() }, Pt { x: h.right(), y: h.bottom() }, p.divider, 1.0);
 }
 
-/// 말풍선 너비: 글자에 맞추되 최대 너비·창 너비를 넘지 않게 (넘치는 글자는 … 으로)
-fn tooltip_width(g: &Gfx, text: &str, room: f32) -> f32 {
-    (g.measure(text, 12.0, Weight::SemiBold) + 20.0).min(TOOLTIP_MAX_W).min(room - 8.0).max(40.0)
+/// 말풍선 크기 (너비, 높이): 이름을 자르지 않고, `TOOLTIP_MAX_W`나 `room`보다 길면 줄을 바꾼다
+fn tooltip_size(g: &Gfx, text: &str, room: f32) -> (f32, f32) {
+    let max_w = TOOLTIP_MAX_W.min(room - 8.0).max(60.0);
+    let (w, h) = g.measure_block(text, 12.0, Weight::SemiBold, max_w - 20.0);
+    ((w + 20.0).ceil().clamp(40.0, max_w), (h + 10.0).ceil().max(26.0))
 }
 
 /// 말풍선 상자. 어두운 배경(투명 테마)에서도 경계가 보이게 옅은 테두리를 두른다.
@@ -209,13 +239,12 @@ fn draw_tooltip_box(g: &Gfx, text: &str, r: RectF) {
     g.fill_round_rect(r, 8.0, TOOLTIP_BG);
     g.stroke_round_rect(RectF::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0), 7.5, Color::hex(0xFFFFFF, 0.14), 1.0);
     let inner = RectF::new(r.x + 10.0, r.y, r.w - 20.0, r.h);
-    g.text(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
+    g.text_block(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
 }
 
 /// 아이콘 위에 말풍선을 띄운다. 위쪽이 `top_limit`보다 올라가면(헤더를 가리면) 아래에 띄운다.
 fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limit: f32) {
-    let w = tooltip_width(g, text, bounds.0);
-    let h = 26.0;
+    let (w, h) = tooltip_size(g, text, bounds.0);
     let mut x = anchor.center().x - w / 2.0;
     x = x.clamp(6.0, (bounds.0 - w - 6.0).max(6.0));
     let mut y = anchor.y - h - 8.0;
@@ -360,8 +389,7 @@ pub struct DockScene<'a> {
 /// 독 말풍선 사각형: 판 반대쪽(화면 안쪽)에 띄운다. 창 영역 계산에도 쓴다.
 pub fn dock_tooltip_rect(g: &Gfx, text: &str, icon: RectF, edge: DockEdge, bounds: (f32, f32)) -> RectF {
     let room = if dock_layout::is_vertical(edge) { bounds.0 - icon.right() - 8.0 } else { bounds.0 };
-    let w = tooltip_width(g, text, room.max(48.0));
-    let h = 26.0;
+    let (w, h) = tooltip_size(g, text, room.max(68.0));
     let c = icon.center();
     let (x, y) = match edge {
         DockEdge::Bottom => (c.x - w / 2.0, icon.y - h - 8.0),
@@ -478,6 +506,14 @@ mod tests {
                 missing: false,
             },
         ];
+        let mut tiles = tiles;
+        tiles.push(TileView {
+            id: "update".into(),
+            label: "새 버전 v0.3.0 설치".into(),
+            badge: "v0.3.0".into(),
+            kind: TileKind::Update,
+            ..Default::default()
+        });
         let layout = PanelLayout::compute(360.0, 480.0, tiles.len());
         for (i, theme) in PICKER_ORDER.iter().enumerate() {
             let gfx = Gfx::offscreen(360 * 2, 480 * 2, 2.0).unwrap();
@@ -525,7 +561,8 @@ mod tests {
             },
             TileView {
                 id: "2".into(),
-                label: "아침 뉴스 라이브 - 오늘의 주요 소식 모아 보기 (전체 재생목록)".into(),
+                label: "아침 뉴스 라이브 - 오늘의 주요 소식 모아 보기 (전체 재생목록) 경제·사회·국제 뉴스 한 번에"
+                    .into(),
                 badge: "뉴스".into(),
                 kind: TileKind::Youtube,
                 ..Default::default()
@@ -548,15 +585,23 @@ mod tests {
                 missing: false,
             },
         ];
+        let mut tiles = tiles;
+        tiles.push(TileView {
+            id: "update".into(),
+            label: "업데이트 내려받는 중…".into(),
+            badge: "받는 중".into(),
+            kind: TileKind::Update,
+            ..Default::default()
+        });
         for (edge, name) in [(DockEdge::Bottom, "bottom"), (DockEdge::Left, "left")] {
             let layout = DockLayout::compute(edge, tiles.len());
             let mag = layout.magnified(Some(layout.rest[1]), 1.0);
             let max = layout.max_length();
             let vertical = dock_layout::is_vertical(edge);
             let (w, h) = if vertical {
-                (dock_layout::THICK + layout.headroom(), max + 2.0 * dock_layout::SIDE_ROOM)
+                (dock_layout::THICK + layout.headroom(), max + 2.0 * layout.side_room())
             } else {
-                (max + 2.0 * dock_layout::SIDE_ROOM, dock_layout::THICK + layout.headroom())
+                (max + 2.0 * layout.side_room(), dock_layout::THICK + layout.headroom())
             };
             let center =
                 if vertical { (dock_layout::THICK / 2.0, h / 2.0) } else { (w / 2.0, h - dock_layout::THICK / 2.0) };

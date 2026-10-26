@@ -17,10 +17,10 @@ pub const MARGIN: f32 = 8.0;
 pub const MAGNIFY: f32 = 0.6;
 /// 확대가 퍼지는 거리 = 아이콘 칸 2.5개
 pub const RANGE: f32 = 2.5 * (ICON + GAP);
-/// 콘텐츠 창이 판 바깥(화면 안쪽)으로 더 차지하는 여유: 확대 + 말풍선
-pub const HEADROOM: f32 = 110.0;
-/// 말풍선 최대 너비 (넘치면 … 으로 줄인다)
-pub const TOOLTIP_MAX_W: f32 = 280.0;
+/// 콘텐츠 창이 판 바깥(화면 안쪽)으로 더 차지하는 여유: 확대 + 여러 줄 말풍선
+pub const HEADROOM: f32 = 140.0;
+/// 말풍선 최대 너비 (넘치면 줄을 바꿔 이름을 끝까지 보여 준다)
+pub const TOOLTIP_MAX_W: f32 = 360.0;
 /// 세로 독은 말풍선이 옆으로 나가므로 가장 커진 아이콘 + 말풍선 최대 너비만큼 여유를 둔다
 pub const SIDE_HEADROOM: f32 = ICON * (1.0 + MAGNIFY) - ICON + 8.0 + TOOLTIP_MAX_W + 8.0;
 /// 콘텐츠 창이 판 양 끝으로 더 차지하는 여유 (확대로 늘어나는 길이 + 선택기)
@@ -69,6 +69,11 @@ impl DockLayout {
 
     pub fn slots(&self) -> Vec<Slot> {
         if self.tiles == 0 { vec![Slot::Add] } else { (0..self.tiles).map(Slot::Tile).collect() }
+    }
+
+    /// 콘텐츠 창이 판 양 끝으로 더 차지하는 여유: 항목이 적어 판이 짧아도 가장 넓은 말풍선이 들어가게
+    pub fn side_room(&self) -> f32 {
+        if is_vertical(self.edge) { SIDE_ROOM } else { SIDE_ROOM.max((TOOLTIP_MAX_W + 16.0 - self.max_length()) / 2.0) }
     }
 
     /// 콘텐츠 창이 화면 안쪽으로 차지하는 여유 (세로 독은 말풍선 너비만큼 더)
@@ -215,6 +220,9 @@ mod tests {
         // 콘텐츠 창 폭(판 + 여유) 안에 가장 커진 아이콘 + 간격 + 가장 긴 말풍선이 들어간다
         assert!(THICK + side.headroom() >= PAD + ICON * (1.0 + MAGNIFY) + 8.0 + TOOLTIP_MAX_W + 4.0);
         assert_eq!(DockLayout::compute(DockEdge::Bottom, 3).headroom(), HEADROOM);
+        // 가로 독은 항목이 하나뿐이어도 가장 넓은 말풍선이 창 안에 들어간다
+        let one = DockLayout::compute(DockEdge::Bottom, 1);
+        assert!(one.max_length() + 2.0 * one.side_room() >= TOOLTIP_MAX_W + 16.0);
     }
 
     #[test]
