@@ -7,5 +7,6 @@ pub mod dock_layout;
 pub mod gfx;
 pub mod layout;
 pub mod panel;
+#[allow(dead_code)] // 독 모드 화면(Task 4)에서 연결하면 지운다
 pub mod scene;
 pub mod theme;

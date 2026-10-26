@@ -1,8 +1,10 @@
 //! 패널 한 프레임 그리기: 유리 덧칠, 헤더, 아이콘, ＋, 팔레트 버튼, 말풍선, 테마 선택기, 드래그 중인 아이콘.
 
+use crate::config::DockEdge;
 use crate::config::Theme;
+use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
 use crate::ui::gfx::{Align, Gfx, Weight};
-use crate::ui::layout::{PANEL_HOVER_SCALE, PanelLayout, Pt, RectF, SWATCH};
+use crate::ui::layout::{PANEL_HOVER_SCALE, PICKER_RADIUS, PanelLayout, Pt, RectF, SWATCH, fan_points};
 use crate::ui::theme::{ACCENT, Color, FALLBACK_ALPHA, PICKER_ORDER, Palette, TOOLTIP_BG, TOOLTIP_TEXT};
 
 pub const WINDOW_RADIUS: f32 = 8.0;
@@ -155,23 +157,37 @@ fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limi
     g.text(text, r, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
 }
 
-fn draw_picker(g: &Gfx, s: &SceneState) {
-    let centers = s.layout.swatch_centers(PICKER_ORDER.len(), s.picker);
-    let radius = SWATCH / 2.0 * (0.6 + 0.4 * s.picker);
+/// 테마 색 원들 (패널·독 공용). `progress`는 펼침 정도 0..1.
+fn draw_swatches(
+    g: &Gfx,
+    centers: &[Pt],
+    progress: f32,
+    palette: &Palette,
+    current: Theme,
+    hover: Option<usize>,
+    bounds: (f32, f32),
+) {
+    let radius = SWATCH / 2.0 * (0.6 + 0.4 * progress);
     for (i, (theme, c)) in PICKER_ORDER.iter().zip(centers.iter()).enumerate() {
         let swatch = crate::ui::theme::palette(*theme);
-        g.fill_circle(*c, radius + 4.0, s.palette.text.with_alpha(0.25));
+        g.fill_circle(*c, radius + 4.0, palette.text.with_alpha(0.25));
         g.fill_circle(*c, radius, swatch.swatch);
-        if *theme == s.theme {
+        if *theme == current {
             g.stroke_circle(*c, radius, ACCENT, 2.5);
         } else {
-            g.stroke_circle(*c, radius, s.palette.divider.with_alpha(0.6), 1.2);
+            g.stroke_circle(*c, radius, palette.divider.with_alpha(0.6), 1.2);
         }
-        if s.picker_hover == Some(i) && s.picker >= 1.0 {
+        if hover == Some(i) && progress >= 1.0 {
             let anchor = RectF::new(c.x - radius, c.y - radius, radius * 2.0, radius * 2.0);
-            draw_tooltip(g, crate::ui::theme::label(*theme), anchor, (s.layout.width, s.layout.height), 6.0);
+            draw_tooltip(g, crate::ui::theme::label(*theme), anchor, bounds, 6.0);
         }
     }
+}
+
+fn draw_picker(g: &Gfx, s: &SceneState) {
+    let centers = s.layout.swatch_centers(PICKER_ORDER.len(), s.picker);
+    let bounds = (s.layout.width, s.layout.height);
+    draw_swatches(g, &centers, s.picker, &s.palette, s.theme, s.picker_hover, bounds);
 }
 
 /// 드래그 중이면 놓일 자리 기준으로 항목 순서를 바꿔 보여준다.
@@ -217,6 +233,121 @@ pub fn draw(g: &Gfx, s: &SceneState) {
     } else if let Some(i) = s.tooltip {
         let text = if i < s.tiles.len() { s.tiles[i].label.as_str() } else { "항목 추가" };
         draw_tooltip(g, text, s.layout.cells[i], (w, h), s.layout.header.bottom());
+    }
+}
+
+/// 독 한 프레임에 필요한 상태
+pub struct DockScene<'a> {
+    pub layout: &'a DockLayout,
+    pub mag: &'a Magnified,
+    /// 판 중심 (콘텐츠 창 기준 DIP)
+    pub center: (f32, f32),
+    /// 콘텐츠 창 크기 (DIP)
+    pub size: (f32, f32),
+    pub palette: Palette,
+    pub acrylic: bool,
+    pub tiles: &'a [TileView],
+    pub pressed: Option<usize>,
+    /// 말풍선을 띄울 칸 번호 (항목·＋·팔레트·메뉴 순서)
+    pub tooltip: Option<usize>,
+    pub menu_hover: bool,
+    pub palette_hover: bool,
+    /// 드래그 중인 항목 (번호, 마우스 위치)
+    pub drag: Option<(usize, Pt)>,
+    pub picker: f32,
+    pub picker_hover: Option<usize>,
+    pub theme: Theme,
+}
+
+/// 독 말풍선: 판 반대쪽(화면 안쪽)에 띄운다.
+fn draw_dock_tooltip(g: &Gfx, text: &str, icon: RectF, edge: DockEdge, bounds: (f32, f32)) {
+    let w = g.measure(text, 12.0, Weight::SemiBold) + 20.0;
+    let h = 26.0;
+    let c = icon.center();
+    let (x, y) = match edge {
+        DockEdge::Bottom => (c.x - w / 2.0, icon.y - h - 8.0),
+        DockEdge::Top => (c.x - w / 2.0, icon.bottom() + 8.0),
+        DockEdge::Left => (icon.right() + 8.0, c.y - h / 2.0),
+        DockEdge::Right => (icon.x - w - 8.0, c.y - h / 2.0),
+    };
+    let x = x.clamp(4.0, (bounds.0 - w - 4.0).max(4.0));
+    let y = y.clamp(4.0, (bounds.1 - h - 4.0).max(4.0));
+    let r = RectF::new(x, y, w, h);
+    g.fill_round_rect(r, 8.0, TOOLTIP_BG);
+    g.text(text, r, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
+}
+
+fn draw_dots(g: &Gfx, r: RectF, p: &Palette, hover: bool) {
+    let c = r.center();
+    g.fill_circle(c, r.w * 0.42, p.text.with_alpha(if hover { 0.16 } else { 0.08 }));
+    let step = r.w * 0.15;
+    for dx in [-step, 0.0, step] {
+        g.fill_circle(Pt { x: c.x + dx, y: c.y }, r.w * 0.05, p.text);
+    }
+}
+
+/// 테마 선택 원 중심 (독): 팔레트 칸에서 화면 안쪽으로 부채꼴
+pub fn dock_swatch_centers(layout: &DockLayout, mag: &Magnified, center: (f32, f32), progress: f32) -> Vec<Pt> {
+    let anchor = layout.slot_rect(mag, center, layout.tiles + 1).center();
+    fan_points(anchor, layout.picker_angles(), PICKER_ORDER.len(), PICKER_RADIUS * progress)
+}
+
+pub fn draw_dock(g: &Gfx, s: &DockScene) {
+    let p = &s.palette;
+    let tint = if s.acrylic { p.tint } else { p.tint.with_alpha(FALLBACK_ALPHA) };
+    let bar = s.layout.bar_rect(s.mag, s.center);
+    let bar = RectF::new(bar.x + 0.5, bar.y + 0.5, bar.w - 1.0, bar.h - 1.0);
+    g.fill_round_rect(bar, WINDOW_RADIUS, tint);
+    g.stroke_round_rect(bar, WINDOW_RADIUS, p.divider, 1.0);
+
+    if !s.mag.separator.is_nan() {
+        let along = s.mag.separator;
+        let inset = dock_layout::PAD + 4.0;
+        let (a, b) = if dock_layout::is_vertical(s.layout.edge) {
+            let y = s.center.1 + along;
+            (Pt { x: bar.x + inset, y }, Pt { x: bar.right() - inset, y })
+        } else {
+            let x = s.center.0 + along;
+            (Pt { x, y: bar.y + inset }, Pt { x, y: bar.bottom() - inset })
+        };
+        g.line(a, b, p.divider, 1.0);
+    }
+
+    for (i, slot) in s.layout.slots().iter().enumerate() {
+        let mut r = s.layout.slot_rect(s.mag, s.center, i);
+        match slot {
+            Slot::Tile(t) => {
+                if s.drag.is_some_and(|(from, _)| from == *t) {
+                    continue;
+                }
+                if s.pressed == Some(*t) && s.drag.is_none() {
+                    r = r.scaled(0.94);
+                }
+                draw_tile(g, &s.tiles[*t], r, s.mag.scales[i] - 1.0);
+            }
+            Slot::Add => draw_add(g, r, p),
+            Slot::Palette => draw_palette_button(g, r.scaled(0.84), p, s.palette_hover),
+            Slot::Menu => draw_dots(g, r, p, s.menu_hover),
+        }
+    }
+
+    if s.picker > 0.0 {
+        let centers = dock_swatch_centers(s.layout, s.mag, s.center, s.picker);
+        draw_swatches(g, &centers, s.picker, p, s.theme, s.picker_hover, s.size);
+    }
+    if let Some((from, pos)) = s.drag {
+        let size = dock_layout::ICON * 1.1;
+        let r = RectF::new(pos.x - size / 2.0, pos.y - size / 2.0, size, size);
+        draw_tile(g, &s.tiles[from], r, 2.0);
+    } else if let Some(i) = s.tooltip {
+        let text = match s.layout.slots()[i] {
+            Slot::Tile(t) => s.tiles[t].label.as_str(),
+            Slot::Add => "항목 추가",
+            Slot::Palette => "테마",
+            Slot::Menu => "메뉴",
+        };
+        let r = s.layout.slot_rect(s.mag, s.center, i);
+        draw_dock_tooltip(g, text, r, s.layout.edge, s.size);
     }
 }
 
@@ -279,6 +410,61 @@ mod tests {
             draw(&gfx, &state);
             gfx.end().unwrap();
             let path = dir.join(format!("panel-{}.png", crate::ui::theme::label(*theme)));
+            gfx.save_png(&path).unwrap();
+            assert!(std::fs::metadata(&path).unwrap().len() > 1000);
+        }
+    }
+
+    #[test]
+    fn renders_dock_snapshots_for_bottom_and_left_edges() {
+        use crate::ui::gfx::Gfx;
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("snapshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tiles = vec![
+            TileView {
+                id: "1".into(), label: "로파이 음악".into(), badge: "로파".into(), kind: TileKind::Youtube
+            },
+            TileView { id: "2".into(), label: "아침 뉴스".into(), badge: "뉴스".into(), kind: TileKind::Youtube },
+            TileView { id: "3".into(), label: "github.com".into(), badge: "G".into(), kind: TileKind::Web },
+            TileView { id: "4".into(), label: "계산기".into(), badge: "계".into(), kind: TileKind::App },
+        ];
+        for (edge, name) in [(DockEdge::Bottom, "bottom"), (DockEdge::Left, "left")] {
+            let layout = DockLayout::compute(edge, tiles.len());
+            let mag = layout.magnified(Some(layout.rest[1]), 1.0);
+            let max = layout.max_length();
+            let vertical = dock_layout::is_vertical(edge);
+            let (w, h) = if vertical {
+                (dock_layout::THICK + dock_layout::HEADROOM, max + 2.0 * dock_layout::SIDE_ROOM)
+            } else {
+                (max + 2.0 * dock_layout::SIDE_ROOM, dock_layout::THICK + dock_layout::HEADROOM)
+            };
+            let center =
+                if vertical { (dock_layout::THICK / 2.0, h / 2.0) } else { (w / 2.0, h - dock_layout::THICK / 2.0) };
+            let gfx = Gfx::offscreen((w * 2.0) as u32, (h * 2.0) as u32, 2.0).unwrap();
+            let state = DockScene {
+                layout: &layout,
+                mag: &mag,
+                center,
+                size: (w, h),
+                palette: crate::ui::theme::palette(Theme::Glass),
+                acrylic: false,
+                tiles: &tiles,
+                pressed: None,
+                tooltip: Some(1),
+                menu_hover: false,
+                palette_hover: false,
+                drag: None,
+                picker: if vertical { 1.0 } else { 0.0 },
+                picker_hover: None,
+                theme: Theme::Glass,
+            };
+            gfx.begin();
+            draw_dock(&gfx, &state);
+            gfx.end().unwrap();
+            let path = dir.join(format!("dock-{name}.png"));
             gfx.save_png(&path).unwrap();
             assert!(std::fs::metadata(&path).unwrap().len() > 1000);
         }
