@@ -447,7 +447,6 @@ impl Panel {
             d.edge,
             px(d.layout.headroom()),
             px(d.layout.side_room()),
-            px(dock_layout::CREDIT_H),
         );
         let content = d.content_px;
         move_window(self.content, content);
@@ -501,12 +500,11 @@ impl Panel {
             rects.push(px(RectF::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0)));
         }
         // 판 아래 "by ssenu", 수정 모드 안내
-        if let Some(gfx) = &self.gfx {
-            rects.push(px(scene::credit_rect(gfx, bar)));
-            if self.dock.editing {
-                let r = scene::edit_hint_rect(gfx, bar, self.dock.edge, self.dock_size());
-                rects.push(px(RectF::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0)));
-            }
+        if self.dock.editing
+            && let Some(gfx) = &self.gfx
+        {
+            let r = scene::edit_hint_rect(gfx, bar, self.dock.edge, self.dock_size());
+            rects.push(px(RectF::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0)));
         }
         if rects != self.last_region
             && let Some(region) = region_from(&rects)

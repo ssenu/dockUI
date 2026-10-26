@@ -12,8 +12,6 @@ pub const WINDOW_RADIUS: f32 = 8.0;
 pub const ICON_RADIUS: f32 = 14.0;
 pub const TITLE: &str = crate::app::APP_NAME;
 pub const BYLINE: &str = "by_ssenu";
-/// 독 판 아래에 보이는 만든 사람
-pub const CREDIT: &str = "by ssenu";
 /// 독 수정 모드 안내
 pub const EDIT_HINT: &str = "빈 곳을 끌어 옮기기 · 아이콘을 끌어 순서 바꾸기";
 
@@ -408,10 +406,14 @@ pub struct DockScene<'a> {
     pub hovered: Option<usize>,
 }
 
-/// 판 아래 "by ssenu" 자리 (콘텐츠 창 기준 DIP). 창 영역 계산에도 쓴다.
-pub fn credit_rect(g: &Gfx, bar: RectF) -> RectF {
-    let w = g.measure(CREDIT, 9.5, Weight::SemiBold) + 12.0;
-    RectF::new(bar.center().x - w / 2.0, bar.bottom() + 1.0, w, dock_layout::CREDIT_H - 1.0)
+/// 판 끝 "by ssenu" 글자 칸 (콘텐츠 창 기준 DIP)
+pub fn credit_rect(layout: &DockLayout, mag: &Magnified, center: (f32, f32)) -> RectF {
+    let bar = layout.bar_rect(mag, center);
+    if dock_layout::is_vertical(layout.edge) {
+        RectF::new(bar.x, center.1 + mag.credit - dock_layout::CREDIT_H / 2.0, bar.w, dock_layout::CREDIT_H)
+    } else {
+        RectF::new(center.0 + mag.credit - dock_layout::CREDIT_W / 2.0, bar.y, dock_layout::CREDIT_W, bar.h)
+    }
 }
 
 /// 수정 모드 안내 자리: 판에서 화면 안쪽으로 (콘텐츠 창 기준 DIP)
@@ -421,7 +423,7 @@ pub fn edit_hint_rect(g: &Gfx, bar: RectF, edge: DockEdge, bounds: (f32, f32)) -
     let c = bar.center();
     let (x, y) = match edge {
         DockEdge::Bottom => (c.x - w / 2.0, bar.y - h - 10.0),
-        DockEdge::Top => (c.x - w / 2.0, bar.bottom() + dock_layout::CREDIT_H + 8.0),
+        DockEdge::Top => (c.x - w / 2.0, bar.bottom() + 10.0),
         DockEdge::Left => (bar.right() + 10.0, bar.y),
         DockEdge::Right => (bar.x - w - 10.0, bar.y),
     };
@@ -430,10 +432,13 @@ pub fn edit_hint_rect(g: &Gfx, bar: RectF, edge: DockEdge, bounds: (f32, f32)) -
     RectF::new(x, y, w, h)
 }
 
-fn draw_credit(g: &Gfx, bar: RectF) {
-    let r = credit_rect(g, bar);
-    g.fill_round_rect(r, r.h / 2.0, Color::hex(0x000000, 0.35));
-    g.text(CREDIT, r, 9.5, Weight::SemiBold, Align::Center, Color::hex(0xFFFFFF, 0.9));
+/// 만든 사람 표시: 판 끝 글자 칸에 `by` / `ssenu` 두 줄, 연한 글씨
+fn draw_credit(g: &Gfx, r: RectF, p: &Palette) {
+    let c = p.subtext.with_alpha(0.55);
+    let line = 11.0;
+    let top = r.center().y - line;
+    g.text("by", RectF::new(r.x, top, r.w, line), 9.0, Weight::SemiBold, Align::Center, c);
+    g.text("ssenu", RectF::new(r.x, top + line, r.w, line), 9.0, Weight::SemiBold, Align::Center, c);
 }
 
 /// 수정 모드 단추: 작게(−) / 크게(＋)는 납작한 원, 완료는 강조색 원에 체크
@@ -501,7 +506,7 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
         let inner = RectF::new(bar.x + 1.0, bar.y + 1.0, bar.w - 2.0, bar.h - 2.0);
         g.stroke_round_rect(inner, WINDOW_RADIUS - 1.0, ACCENT, 1.6);
     }
-    draw_credit(g, bar);
+    draw_credit(g, credit_rect(s.layout, s.mag, s.center), p);
     if let Some(along) = s.mag.separator {
         let inset = dock_layout::PAD + 6.0;
         let (a, b) = if dock_layout::is_vertical(s.layout.edge) {
@@ -703,13 +708,10 @@ mod tests {
             let (w, h) = if vertical {
                 (dock_layout::THICK + layout.headroom(), max + 2.0 * layout.side_room())
             } else {
-                (max + 2.0 * layout.side_room(), dock_layout::THICK + layout.headroom() + dock_layout::CREDIT_H)
+                (max + 2.0 * layout.side_room(), dock_layout::THICK + layout.headroom())
             };
-            let center = if vertical {
-                (dock_layout::THICK / 2.0, h / 2.0)
-            } else {
-                (w / 2.0, h - dock_layout::CREDIT_H - dock_layout::THICK / 2.0)
-            };
+            let center =
+                if vertical { (dock_layout::THICK / 2.0, h / 2.0) } else { (w / 2.0, h - dock_layout::THICK / 2.0) };
             let gfx = Gfx::offscreen((w * 2.0) as u32, (h * 2.0) as u32, 2.0).unwrap();
             let state = DockScene {
                 layout: &layout,

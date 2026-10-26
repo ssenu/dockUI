@@ -25,8 +25,14 @@ pub const TOOLTIP_MAX_W: f32 = 360.0;
 pub const SIDE_HEADROOM: f32 = ICON * (1.0 + MAGNIFY) - ICON + 8.0 + TOOLTIP_MAX_W + 8.0;
 /// 콘텐츠 창이 판 양 끝으로 더 차지하는 여유 (확대로 늘어나는 길이 + 선택기)
 pub const SIDE_ROOM: f32 = 90.0;
-/// 판 아래 "by ssenu" 글자 줄 높이
-pub const CREDIT_H: f32 = 14.0;
+/// 판 끝 "by ssenu" 글자 칸: 가로 독은 폭, 세로 독은 높이 (DIP)
+pub const CREDIT_W: f32 = 36.0;
+pub const CREDIT_H: f32 = 30.0;
+
+/// 이 가장자리 독에서 글자 칸이 판 길이 방향으로 차지하는 길이
+pub fn credit_len(edge: DockEdge) -> f32 {
+    if is_vertical(edge) { CREDIT_H } else { CREDIT_W }
+}
 /// 독 아이콘 크기(설정값, DIP): 기본·최소·최대·한 단계
 pub const DEFAULT_SIZE: u32 = 48;
 pub const MIN_SIZE: u32 = 32;
@@ -63,6 +69,8 @@ pub struct Magnified {
     pub length: f32,
     /// 항목과 수정 단추 사이 구분선 (판 중심 기준, 수정 모드에서만)
     pub separator: Option<f32>,
+    /// 판 끝 글자 칸 가운데 (판 중심 기준)
+    pub credit: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +83,8 @@ pub struct DockLayout {
     pub rest: Vec<f32>,
     pub length: f32,
     pub separator: Option<f32>,
+    /// 판 끝 글자 칸 가운데 (판 중심 기준)
+    pub credit: f32,
 }
 
 pub fn is_vertical(edge: DockEdge) -> bool {
@@ -89,9 +99,11 @@ pub fn falloff(distance: f32) -> f32 {
 
 impl DockLayout {
     pub fn compute(edge: DockEdge, tiles: usize, editing: bool) -> DockLayout {
-        let mut layout = DockLayout { edge, tiles, editing, rest: Vec::new(), length: 0.0, separator: None };
+        let mut layout =
+            DockLayout { edge, tiles, editing, rest: Vec::new(), length: 0.0, separator: None, credit: 0.0 };
         let widths = vec![ICON; layout.slots().len()];
-        (layout.rest, layout.length, layout.separator) = place(&widths, layout.split());
+        (layout.rest, layout.length, layout.separator, layout.credit) =
+            place(&widths, layout.split(), credit_len(edge));
         layout
     }
 
@@ -129,8 +141,8 @@ impl DockLayout {
             })
             .collect();
         let widths: Vec<f32> = scales.iter().map(|s| ICON * s).collect();
-        let (centers, length, separator) = place(&widths, self.split());
-        Magnified { centers, scales, length, separator }
+        let (centers, length, separator, credit) = place(&widths, self.split(), credit_len(self.edge));
+        Magnified { centers, scales, length, separator, credit }
     }
 
     /// 가장 많이 커졌을 때의 길이 (콘텐츠 창 크기 계산용)
@@ -189,8 +201,9 @@ impl DockLayout {
 }
 
 /// 칸 너비들을 간격·여백과 함께 늘어놓고, 판 중심이 0이 되도록 옮긴다.
-/// `split` 칸 앞에는 구분선 자리를 둔다. 반환: (칸 중심들, 전체 길이, 구분선 위치)
-fn place(widths: &[f32], split: Option<usize>) -> (Vec<f32>, f32, Option<f32>) {
+/// `split` 칸 앞에는 구분선 자리를, 마지막 칸 뒤에는 길이 `tail`의 글자 칸을 둔다.
+/// 반환: (칸 중심들, 전체 길이, 구분선 위치, 글자 칸 가운데)
+fn place(widths: &[f32], split: Option<usize>, tail: f32) -> (Vec<f32>, f32, Option<f32>, f32) {
     let mut x = PAD;
     let mut centers = Vec::with_capacity(widths.len());
     let mut separator = None;
@@ -202,14 +215,15 @@ fn place(widths: &[f32], split: Option<usize>) -> (Vec<f32>, f32, Option<f32>) {
         centers.push(x + w / 2.0);
         x += w + GAP;
     }
-    let length = x - GAP + PAD;
+    let credit = x + tail / 2.0;
+    let length = x + tail + PAD;
     let half = length / 2.0;
-    (centers.iter().map(|c| c - half).collect(), length, separator.map(|s| s - half))
+    (centers.iter().map(|c| c - half).collect(), length, separator.map(|s| s - half), credit - half)
 }
 
-/// 화면 가장자리에서 판까지 띄우는 간격 (DIP). 아래 독은 판 밑에 "by ssenu" 줄이 들어갈 자리를 더 둔다.
-pub fn edge_margin(edge: DockEdge) -> f32 {
-    if edge == DockEdge::Bottom { MARGIN + CREDIT_H } else { MARGIN }
+/// 화면 가장자리에서 판까지 띄우는 간격 (DIP)
+pub fn edge_margin(_edge: DockEdge) -> f32 {
+    MARGIN
 }
 
 /// 판 중심 (px). `widest`(가장 커졌을 때 길이)가 작업 영역 안에 들어가는 범위에서 `offset`(0..1)만큼 옮긴다.
@@ -259,11 +273,10 @@ pub fn offset_for(work: PxRect, edge: DockEdge, widest: i32, center_along: i32) 
 type PxRect = (i32, i32, i32, i32);
 
 /// 콘텐츠 창의 화면 사각형 (px): 판을 화면 안쪽으로 `headroom`, 양 끝으로 `side`만큼 넓힌다.
-/// 아래 독은 판 밑 "by ssenu" 줄(`footer`)까지 포함한다.
-pub fn content_rect(bar: PxRect, edge: DockEdge, headroom: i32, side: i32, footer: i32) -> PxRect {
+pub fn content_rect(bar: PxRect, edge: DockEdge, headroom: i32, side: i32) -> PxRect {
     let (x, y, w, h) = bar;
     match edge {
-        DockEdge::Bottom => (x - side, y - headroom, w + 2 * side, h + headroom + footer),
+        DockEdge::Bottom => (x - side, y - headroom, w + 2 * side, h + headroom),
         DockEdge::Top => (x - side, y, w + 2 * side, h + headroom),
         DockEdge::Left => (x, y - side, w + headroom, h + 2 * side),
         DockEdge::Right => (x - headroom, y - side, w + headroom, h + 2 * side),
@@ -278,11 +291,13 @@ mod tests {
     fn rest_layout_is_centered_and_holds_only_tiles() {
         let l = DockLayout::compute(DockEdge::Bottom, 2, false);
         assert_eq!(l.slots(), vec![Slot::Tile(0), Slot::Tile(1)]);
-        let expected = PAD * 2.0 + 2.0 * ICON + GAP;
+        let expected = PAD * 2.0 + 2.0 * ICON + GAP + GAP + CREDIT_W;
         assert!((l.length - expected).abs() < 0.01);
         assert!((l.rest[0] + l.length / 2.0 - (PAD + ICON / 2.0)).abs() < 0.01);
-        let sum: f32 = l.rest.first().unwrap() + l.rest.last().unwrap();
-        assert!(sum.abs() < 0.01, "가운데 정렬");
+        // 판 전체(아이콘 + 끝 글자 칸)가 가운데: 첫 칸 앞 여백과 글자 칸 뒤 여백이 같다
+        let front = l.rest[0] - ICON / 2.0 + l.length / 2.0;
+        let back = l.length / 2.0 - (l.credit + CREDIT_W / 2.0);
+        assert!((front - back).abs() < 0.01, "가운데 정렬");
     }
 
     #[test]
@@ -303,6 +318,22 @@ mod tests {
         // 가로 독은 항목이 하나뿐이어도 가장 넓은 말풍선이 창 안에 들어간다
         let one = DockLayout::compute(DockEdge::Bottom, 1, false);
         assert!(one.max_length() + 2.0 * one.side_room() >= TOOLTIP_MAX_W + 16.0);
+    }
+
+    #[test]
+    fn credit_sits_inside_the_bar_after_the_last_slot() {
+        let l = DockLayout::compute(DockEdge::Bottom, 2, false);
+        let expected = PAD * 2.0 + 2.0 * ICON + GAP + GAP + CREDIT_W;
+        assert!((l.length - expected).abs() < 0.01, "{} vs {expected}", l.length);
+        assert!(l.credit > l.rest[1] + ICON / 2.0);
+        assert!(l.credit + CREDIT_W / 2.0 <= l.length / 2.0 - PAD + 0.01);
+        let m = l.magnified(None, 0.0);
+        assert_eq!(l.hit(&m, l.credit, THICK / 2.0), Hit::Empty);
+        // 수정 모드에서도 맨 끝 (완료 단추 뒤)
+        let e = DockLayout::compute(DockEdge::Left, 2, true);
+        assert!(e.credit > *e.rest.last().unwrap());
+        assert_eq!(credit_len(DockEdge::Left), CREDIT_H);
+        assert_eq!(credit_len(DockEdge::Bottom), CREDIT_W);
     }
 
     #[test]
@@ -359,7 +390,7 @@ mod tests {
         assert_eq!(bar_center(work, DockEdge::Bottom, 400, 68, 8, 1.0).0, 1720);
         assert_eq!(rect_around((960, 998), DockEdge::Bottom, 400, 68), (760, 964, 400, 68));
         assert_eq!(rect_around((42, 520), DockEdge::Left, 400, 68), (8, 320, 68, 400));
-        assert!(edge_margin(DockEdge::Bottom) > edge_margin(DockEdge::Top));
+        assert_eq!(edge_margin(DockEdge::Bottom), MARGIN);
     }
 
     #[test]
@@ -381,10 +412,10 @@ mod tests {
     #[test]
     fn content_extends_into_the_screen() {
         let bar = (760, 964, 400, 68);
-        assert_eq!(content_rect(bar, DockEdge::Bottom, 110, 90, 14), (670, 854, 580, 192));
-        assert_eq!(content_rect((760, 8, 400, 68), DockEdge::Top, 110, 90, 14), (670, 8, 580, 178));
-        assert_eq!(content_rect((8, 320, 68, 400), DockEdge::Left, 110, 90, 14), (8, 230, 178, 580));
-        assert_eq!(content_rect((1844, 320, 68, 400), DockEdge::Right, 110, 90, 14), (1734, 230, 178, 580));
+        assert_eq!(content_rect(bar, DockEdge::Bottom, 110, 90), (670, 854, 580, 178));
+        assert_eq!(content_rect((760, 8, 400, 68), DockEdge::Top, 110, 90), (670, 8, 580, 178));
+        assert_eq!(content_rect((8, 320, 68, 400), DockEdge::Left, 110, 90), (8, 230, 178, 580));
+        assert_eq!(content_rect((1844, 320, 68, 400), DockEdge::Right, 110, 90), (1734, 230, 178, 580));
     }
 
     #[test]
