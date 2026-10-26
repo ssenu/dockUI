@@ -1,37 +1,35 @@
 ﻿<#
 .SYNOPSIS
-  PyInstaller로 앱을 묶고 Inno Setup으로 설치 프로그램과 SHA256SUMS.txt를 만든다.
+  cargo로 릴리스 exe를 만들고 Inno Setup으로 설치 프로그램과 SHA256SUMS.txt를 만든다.
 .EXAMPLE
   ./scripts/build.ps1
-  ./scripts/build.ps1 -Version 0.2.0 -Python python
+  ./scripts/build.ps1 -Version 0.2.0
 #>
 param(
-    [string]$Version,
-    [string]$Python
+    [string]$Version
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
-if (-not $Python) {
-    $venv = Join-Path $root ".venv\Scripts\python.exe"
-    $Python = if (Test-Path $venv) { $venv } else { "python" }
-}
-if (-not $Version) {
-    $Version = (& $Python -c "from yt_launcher.version import __version__; print(__version__)").Trim()
+$cargoToml = Join-Path $root "Cargo.toml"
+$current = ((Get-Content $cargoToml -Raw) | Select-String '(?m)^version = "([^"]+)"').Matches[0].Groups[1].Value
+if (-not $Version) { $Version = $current }
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "잘못된 버전 형식: $Version" }
+if ($Version -ne $current) {
+    throw "Cargo.toml 버전($current)과 -Version($Version)이 다릅니다. Cargo.toml을 먼저 고치세요."
 }
 Write-Host "Building YT Launcher $Version"
 
-& $Python -m PyInstaller --noconfirm --clean --windowed `
-    --name YTLauncher `
-    --icon "src\yt_launcher\assets\icon.ico" `
-    --add-data "src\yt_launcher\assets;yt_launcher\assets" `
-    --paths src `
-    --distpath dist --workpath build `
-    launcher.py
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
-$icon = Join-Path $root "dist\YTLauncher\_internal\yt_launcher\assets\icon.png"
-if (-not (Test-Path $icon)) { throw "icon.png가 묶음에 없습니다: $icon" }
+# 태그로 버전을 바꾸면 Cargo.lock의 자기 버전 줄도 바뀌므로 --locked는 쓰지 않는다
+cargo build --release
+if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+
+# 설치 프로그램이 묶는 폴더: exe 하나 (글꼴·아이콘은 exe 안에 들어 있다)
+$stage = Join-Path $root "dist\YTLauncher"
+Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $stage | Out-Null
+Copy-Item (Join-Path $root "target\release\YTLauncher.exe") $stage
 
 $iscc = $null
 $command = Get-Command iscc.exe -ErrorAction SilentlyContinue
@@ -50,6 +48,7 @@ if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
 $setupName = "YT-Launcher-Setup-$Version.exe"
 $setupPath = Join-Path $root "dist\installer\$setupName"
+if (-not (Test-Path $setupPath)) { throw "설치 프로그램이 없습니다: $setupPath" }
 $hash = (Get-FileHash $setupPath -Algorithm SHA256).Hash.ToLower()
 "$hash  $setupName" | Set-Content (Join-Path $root "dist\installer\SHA256SUMS.txt") -Encoding ascii
 Write-Host "Done: $setupPath"

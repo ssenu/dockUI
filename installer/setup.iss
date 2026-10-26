@@ -20,7 +20,7 @@ DisableDirPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist\installer
 OutputBaseFilename=YT-Launcher-Setup-{#AppVersion}
-SetupIconFile=..\src\yt_launcher\assets\icon.ico
+SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 Compression=lzma2
@@ -39,11 +39,11 @@ Name: "autostart"; Description: "윈도우 시작 시 자동 실행"; GroupDescr
 Name: "desktopicon"; Description: "바탕화면 바로가기 만들기"; GroupDescription: "추가 옵션:"; Flags: unchecked
 
 [InstallDelete]
-; 업그레이드 시 이전 버전의 라이브러리를 지워 섞이지 않게 한다.
+; 0.1.x(파이썬)에서 올라올 때 남은 라이브러리 폴더를 지운다. 0.2.0부터는 exe 하나뿐이다.
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
-Source: "..\dist\YTLauncher\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\YTLauncher\YTLauncher.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
