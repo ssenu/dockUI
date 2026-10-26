@@ -70,6 +70,8 @@ pub struct SceneState<'a> {
     pub theme: Theme,
     /// 끌어 놓을 수 있는 것이 위에 있음 (강조 테두리)
     pub drop_hover: bool,
+    /// DIP → 실제 픽셀 배율 (말풍선 픽셀 맞춤)
+    pub px_scale: f32,
 }
 
 /// 문자열에서 앞 두 글자 (배지용)
@@ -240,16 +242,27 @@ fn tooltip_size(g: &Gfx, text: &str, room: f32) -> (f32, f32) {
     ((w + 20.0).ceil().clamp(40.0, max_w), (h + 10.0).ceil().max(26.0))
 }
 
+/// 사각형을 실제 화면 픽셀 경계에 맞춘다 (`scale` = DIP → px 배율)
+pub fn snap(r: RectF, scale: f32) -> RectF {
+    let f = |v: f32| (v * scale).round() / scale;
+    let (x, y) = (f(r.x), f(r.y));
+    RectF::new(x, y, f(r.right()) - x, f(r.bottom()) - y)
+}
+
 /// 말풍선 상자. 어두운 배경(투명 테마)에서도 경계가 보이게 옅은 테두리를 두른다.
-fn draw_tooltip_box(g: &Gfx, text: &str, r: RectF) {
-    g.fill_round_rect(r, 8.0, TOOLTIP_BG);
-    g.stroke_round_rect(RectF::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0), 7.5, Color::hex(0xFFFFFF, 0.14), 1.0);
+/// `alpha`(0..1)는 페이드, `scale`은 픽셀 맞춤용 배율 (모서리·1px 테두리를 또렷하게).
+fn draw_tooltip_box(g: &Gfx, text: &str, r: RectF, alpha: f32, scale: f32) {
+    let r = snap(r, scale);
+    let half = 0.5 / scale;
+    g.fill_round_rect(r, 8.0, TOOLTIP_BG.with_alpha(TOOLTIP_BG.a * alpha));
+    let edge = RectF::new(r.x + half, r.y + half, r.w - 2.0 * half, r.h - 2.0 * half);
+    g.stroke_round_rect(edge, 8.0 - half, Color::hex(0xFFFFFF, 0.14 * alpha), 1.0 / scale);
     let inner = RectF::new(r.x + 10.0, r.y, r.w - 20.0, r.h);
-    g.text_block(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT);
+    g.text_block(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT.with_alpha(alpha));
 }
 
 /// 아이콘 위에 말풍선을 띄운다. 위쪽이 `top_limit`보다 올라가면(헤더를 가리면) 아래에 띄운다.
-fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limit: f32) {
+fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limit: f32, scale: f32) {
     let (w, h) = tooltip_size(g, text, bounds.0);
     let mut x = anchor.center().x - w / 2.0;
     x = x.clamp(6.0, (bounds.0 - w - 6.0).max(6.0));
@@ -258,11 +271,11 @@ fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limi
         y = anchor.bottom() + 8.0;
     }
     let r = RectF::new(x, y, w, h);
-    draw_tooltip_box(g, text, r);
+    draw_tooltip_box(g, text, r, 1.0, scale);
 }
 
 /// 원(중심 c, 반지름 r)에서 `dir` 방향으로 떨어진 곳에 말풍선을 띄운다 (이웃 원을 가리지 않게).
-fn draw_tooltip_toward(g: &Gfx, text: &str, c: Pt, r: f32, dir: (f32, f32), bounds: (f32, f32)) {
+fn draw_tooltip_toward(g: &Gfx, text: &str, c: Pt, r: f32, dir: (f32, f32), bounds: (f32, f32), scale: f32) {
     let w = g.measure(text, 12.0, Weight::SemiBold) + 20.0;
     let h = 26.0;
     // 상자 가운데에서 dir 방향으로 상자 테두리까지 거리
@@ -275,19 +288,13 @@ fn draw_tooltip_toward(g: &Gfx, text: &str, c: Pt, r: f32, dir: (f32, f32), boun
     let x = (c.x + dir.0 * d - w / 2.0).clamp(4.0, (bounds.0 - w - 4.0).max(4.0));
     let y = (c.y + dir.1 * d - h / 2.0).clamp(4.0, (bounds.1 - h - 4.0).max(4.0));
     let rect = RectF::new(x, y, w, h);
-    draw_tooltip_box(g, text, rect);
+    draw_tooltip_box(g, text, rect, 1.0, scale);
 }
 
 /// 테마 색 원들 (패널·독 공용). `progress`는 펼침 정도 0..1, `tip_dirs`는 원마다 말풍선을 띄울 방향.
-fn draw_swatches(
-    g: &Gfx,
-    centers: &[Pt],
-    tip_dirs: &[(f32, f32)],
-    progress: f32,
-    current: Theme,
-    hover: Option<usize>,
-    bounds: (f32, f32),
-) {
+fn draw_swatches(g: &Gfx, centers: &[Pt], tip_dirs: &[(f32, f32)], s: &SceneState) {
+    let (progress, current, hover) = (s.picker, s.theme, s.picker_hover);
+    let bounds = (s.layout.width, s.layout.height);
     let base = SWATCH / 2.0 * (0.6 + 0.4 * progress);
     let hover = hover.filter(|_| progress >= 1.0);
     for (i, (theme, c)) in PICKER_ORDER.iter().zip(centers.iter()).enumerate() {
@@ -305,7 +312,7 @@ fn draw_swatches(
     if let Some(i) = hover
         && let (Some(theme), Some(c), Some(dir)) = (PICKER_ORDER.get(i), centers.get(i), tip_dirs.get(i))
     {
-        draw_tooltip_toward(g, crate::ui::theme::label(*theme), *c, base * 1.08 + 3.5, *dir, bounds);
+        draw_tooltip_toward(g, crate::ui::theme::label(*theme), *c, base * 1.08 + 3.5, *dir, bounds, s.px_scale);
     }
 }
 
@@ -321,8 +328,7 @@ fn draw_picker(g: &Gfx, s: &SceneState) {
             (dx / len, dy / len)
         })
         .collect();
-    let bounds = (s.layout.width, s.layout.height);
-    draw_swatches(g, &centers, &dirs, s.picker, s.theme, s.picker_hover, bounds);
+    draw_swatches(g, &centers, &dirs, s);
 }
 
 /// 끌어 놓기 강조: 판 테두리를 강조색으로, 안쪽은 옅게
@@ -380,7 +386,7 @@ pub fn draw(g: &Gfx, s: &SceneState) {
         draw_tile(g, &s.tiles[d.from], r, 2.0);
     } else if let Some(i) = s.tooltip {
         let text = if i < s.tiles.len() { s.tiles[i].label.as_str() } else { "항목 추가" };
-        draw_tooltip(g, text, s.layout.cells[i], (w, h), s.layout.header.bottom());
+        draw_tooltip(g, text, s.layout.cells[i], (w, h), s.layout.header.bottom(), s.px_scale);
     }
 }
 
@@ -404,6 +410,10 @@ pub struct DockScene<'a> {
     pub drop_hover: bool,
     /// 마우스가 올라간 칸 (수정 단추 강조)
     pub hovered: Option<usize>,
+    /// 말풍선 불투명도 0..1 (나타나고 사라질 때 페이드)
+    pub tooltip_alpha: f32,
+    /// DIP → 실제 픽셀 배율 (말풍선 픽셀 맞춤)
+    pub px_scale: f32,
 }
 
 /// 판 끝 "by ssenu" 글자 칸 (콘텐츠 창 기준 DIP)
@@ -539,7 +549,7 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
         }
     }
     if s.layout.editing && s.drag.is_none() && s.tooltip.is_none() {
-        draw_tooltip_box(g, EDIT_HINT, edit_hint_rect(g, bar, s.layout.edge, s.size));
+        draw_tooltip_box(g, EDIT_HINT, edit_hint_rect(g, bar, s.layout.edge, s.size), 1.0, s.px_scale);
     }
     if let Some((from, pos)) = s.drag {
         let size = dock_layout::ICON * 1.1;
@@ -548,13 +558,23 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
     } else if let Some(i) = s.tooltip {
         let text = dock_tooltip_text(s.layout, s.tiles, i);
         let icon = s.layout.slot_rect(s.mag, s.center, i);
-        draw_tooltip_box(g, text, dock_tooltip_rect(g, text, icon, s.layout.edge, s.size));
+        let rect = dock_tooltip_rect(g, text, icon, s.layout.edge, s.size);
+        draw_tooltip_box(g, text, rect, s.tooltip_alpha, s.px_scale);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snap_aligns_rect_to_device_pixels() {
+        let r = snap(RectF::new(10.3, 20.6, 50.2, 26.1), 1.5);
+        for v in [r.x, r.y, r.right(), r.bottom()] {
+            assert!(((v * 1.5) - (v * 1.5).round()).abs() < 1e-4, "{v}");
+        }
+        assert_eq!(snap(RectF::new(1.0, 2.0, 3.0, 4.0), 1.0), RectF::new(1.0, 2.0, 3.0, 4.0));
+    }
 
     #[test]
     fn badge_takes_two_visible_chars() {
@@ -639,6 +659,7 @@ mod tests {
                 picker_hover: if i == 0 { Some(2) } else { None },
                 theme: *theme,
                 drop_hover: *theme == Theme::Glass,
+                px_scale: 2.0,
             };
             gfx.begin();
             draw(&gfx, &state);
@@ -726,6 +747,8 @@ mod tests {
                 drag: None,
                 drop_hover: false,
                 hovered: if editing { Some(layout.slots().len() - 1) } else { None },
+                tooltip_alpha: 1.0,
+                px_scale: 2.0,
             };
             gfx.begin();
             draw_dock(&gfx, &state);

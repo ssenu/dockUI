@@ -60,7 +60,6 @@ const DRAG_THRESHOLD: f32 = 6.0;
 const PICKER_MS: f32 = 160.0;
 const FADE_MS: f32 = 200.0;
 /// 독 말풍선이 차지하는 여유 (창 영역 계산용)
-const TOOLTIP_ROOM: f32 = 40.0;
 const GLASS_CLASS: &str = "YTLauncherGlass";
 const CONTENT_CLASS: &str = "YTLauncherContent";
 const CMD_EDIT: u32 = 1;
@@ -186,6 +185,8 @@ struct Dock {
     editing: bool,
     /// 판을 끌어 옮기는 중: 누른 곳과 판 중심의 along 거리 (px)
     moving: Option<i32>,
+    /// 마우스가 판 위에 있음 (표시 영역을 넓혀 둔다)
+    inside: bool,
 }
 
 pub struct Panel {
@@ -219,6 +220,9 @@ pub struct Panel {
     /// 마지막으로 놓은 유리 창·창 영역 (같으면 다시 하지 않는다)
     last_glass: Option<PxRect>,
     last_region: Vec<PxRect>,
+    /// 독 말풍선 불투명도 (페이드)와 마지막으로 보인 칸 (사라질 때도 그 자리에서 사라지게)
+    tip: Anim,
+    tip_slot: Option<usize>,
     rx: Receiver<PanelCmd>,
     /// 끌어 놓기 대상이 화면에 명령을 보낼 채널
     tx: Sender<PanelCmd>,
@@ -308,6 +312,7 @@ impl Panel {
                 size: spec.dock_size,
                 editing: false,
                 moving: None,
+                inside: false,
             },
             panel_rect: spec.panel_rect,
             positioning: false,
@@ -328,6 +333,8 @@ impl Panel {
             last_frame: Instant::now(),
             last_glass: None,
             last_region: Vec::new(),
+            tip: Anim::at(0.0),
+            tip_slot: None,
             rx,
             tx: tx.clone(),
             drop_hover: false,
@@ -485,27 +492,23 @@ impl Panel {
             self.positioning = false;
         }
 
-        // 창 영역: 판 + 커진 아이콘이 나가는 쪽 + 말풍선 + 열린 선택기
-        let grow = m.scales.iter().fold(0.0f32, |a, &b| a.max(b - 1.0)) * dock_layout::ICON;
-        let extra = if grow > 0.0 || self.dock_tooltip().is_some() { grow + TOOLTIP_ROOM } else { 0.0 };
-        let outward = match self.dock.edge {
-            DockEdge::Bottom => RectF::new(bar.x, bar.y - extra, bar.w, bar.h + extra),
-            DockEdge::Top => RectF::new(bar.x, bar.y, bar.w, bar.h + extra),
-            DockEdge::Left => RectF::new(bar.x, bar.y, bar.w + extra, bar.h),
-            DockEdge::Right => RectF::new(bar.x - extra, bar.y, bar.w + extra, bar.h),
+        // 창 영역은 두 상태로만 바꾼다: 쉼(판 + 수정 안내) / 활성(콘텐츠 창 전체).
+        // 확대 애니메이션 매 프레임 영역을 바꾸면 새 그림과 어긋나 말풍선이 잘리고 잔상이 남는다.
+        let busy = self.drag.is_some() || self.dock.moving.is_some();
+        let active = dock_layout::region_active(self.dock.inside, busy, self.dock.amount.value, self.tip.value);
+        let rects = if active {
+            let (_, _, w, h) = self.dock.content_px;
+            vec![(0, 0, w, h)]
+        } else {
+            let mut v = vec![px(bar)];
+            if self.dock.editing
+                && let Some(gfx) = &self.gfx
+            {
+                let r = scene::edit_hint_rect(gfx, bar, self.dock.edge, self.dock_size());
+                v.push(px(RectF::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0)));
+            }
+            v
         };
-        let mut rects = vec![px(outward)];
-        // 말풍선은 판보다 넓거나 옆으로 길 수 있으므로 그 사각형을 따로 넣는다 (안 넣으면 잘린다)
-        if let Some(r) = self.dock_tooltip_rect(&m) {
-            rects.push(px(RectF::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0)));
-        }
-        // 판 아래 "by ssenu", 수정 모드 안내
-        if self.dock.editing
-            && let Some(gfx) = &self.gfx
-        {
-            let r = scene::edit_hint_rect(gfx, bar, self.dock.edge, self.dock_size());
-            rects.push(px(RectF::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0)));
-        }
         if rects != self.last_region
             && let Some(region) = region_from(&rects)
         {
@@ -517,14 +520,6 @@ impl Panel {
     fn dock_size(&self) -> (f32, f32) {
         let s = self.dock_scale();
         (self.dock.content_px.2 as f32 / s, self.dock.content_px.3 as f32 / s)
-    }
-
-    fn dock_tooltip_rect(&self, m: &Magnified) -> Option<RectF> {
-        let (gfx, i) = (self.gfx.as_ref()?, self.dock_tooltip()?);
-        let layout = &self.dock.layout;
-        let text = scene::dock_tooltip_text(layout, &self.tiles, i);
-        let icon = layout.slot_rect(m, self.dock_center(), i);
-        Some(scene::dock_tooltip_rect(gfx, text, icon, layout.edge, self.dock_size()))
     }
 
     /// 마우스가 올라간 독 칸 번호
@@ -645,6 +640,7 @@ impl Panel {
                     picker_hover: self.picker_hover,
                     theme: self.theme,
                     drop_hover: self.drop_hover,
+                    px_scale: self.scale,
                 };
                 scene::draw(gfx, &state);
             }
@@ -660,10 +656,12 @@ impl Panel {
                     acrylic: self.acrylic,
                     tiles: &self.tiles,
                     pressed,
-                    tooltip: self.dock_tooltip(),
+                    tooltip: self.tip_slot.filter(|&i| i < self.dock.layout.slots().len() && self.tip.value > 0.0),
                     drag: self.drag,
                     drop_hover: self.drop_hover,
                     hovered: self.dock_hovered(),
+                    tooltip_alpha: self.tip.value,
+                    px_scale: self.dock_scale(),
                 };
                 scene::draw_dock(gfx, &state);
             }
@@ -710,6 +708,15 @@ impl Panel {
             moving |= self.dock.amount.step(dt);
             if self.dock.amount.value == 0.0 && self.dock.amount.target == 0.0 {
                 self.dock.pointer = None;
+            }
+            let target = self.dock_tooltip();
+            if target.is_some() {
+                self.tip_slot = target;
+            }
+            self.tip.set(if target.is_some() { 1.0 } else { 0.0 });
+            moving |= self.tip.step(dt);
+            if self.tip.value == 0.0 && self.tip.target == 0.0 {
+                self.tip_slot = None;
             }
             self.update_dock_glass();
         }
@@ -853,21 +860,19 @@ impl Panel {
             self.picker_hover = swatch;
             self.render();
         }
-        if self.mode == Mode::Dock && !self.dock.editing {
-            let m = self.dock_mag();
-            self.dock.pointer = Some(self.dock_axes(p, &m).0);
-            self.dock.amount.set(1.0);
-            self.start_animation();
+        if self.mode == Mode::Dock {
+            if !self.dock.inside {
+                self.dock.inside = true;
+                self.start_animation();
+            }
+            if !self.dock.editing {
+                let m = self.dock_mag();
+                self.dock.pointer = Some(self.dock_axes(p, &m).0);
+                self.dock.amount.set(1.0);
+                self.start_animation();
+            }
         }
-        let hit = self.hit(p);
-        if self.dock.editing && hit != self.hover_hit {
-            // 수정 단추 강조·말풍선은 애니메이션 없이 바로 다시 그린다
-            self.hover_hit = hit;
-            self.update_dock_glass();
-            self.render();
-            return;
-        }
-        self.set_hover(hit);
+        self.set_hover(self.hit(p));
     }
 
     fn on_mouse_leave(&mut self) {
@@ -876,6 +881,7 @@ impl Panel {
             self.set_hover(Hit::Empty);
             self.picker_hover = None;
             if self.mode == Mode::Dock {
+                self.dock.inside = false;
                 self.dock.amount.set(0.0);
                 self.start_animation();
             }

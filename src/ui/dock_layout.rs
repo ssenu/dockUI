@@ -221,6 +221,12 @@ fn place(widths: &[f32], split: Option<usize>, tail: f32) -> (Vec<f32>, f32, Opt
     (centers.iter().map(|c| c - half).collect(), length, separator.map(|s| s - half), credit - half)
 }
 
+/// 독 콘텐츠 창 표시 영역을 넓혀 둘지: 마우스가 위에 있거나, 끌기 중이거나, 확대·말풍선이 남아 있으면.
+/// 매 프레임 영역을 바꾸면 새 그림과 한 프레임씩 어긋나 말풍선이 잘리므로 두 상태로만 바꾼다.
+pub fn region_active(inside: bool, busy: bool, amount: f32, tooltip: f32) -> bool {
+    inside || busy || amount > 0.0 || tooltip > 0.0
+}
+
 /// 화면 가장자리에서 판까지 띄우는 간격 (DIP)
 pub fn edge_margin(_edge: DockEdge) -> f32 {
     MARGIN
@@ -334,6 +340,15 @@ mod tests {
         assert!(e.credit > *e.rest.last().unwrap());
         assert_eq!(credit_len(DockEdge::Left), CREDIT_H);
         assert_eq!(credit_len(DockEdge::Bottom), CREDIT_W);
+    }
+
+    #[test]
+    fn region_grows_on_hover_and_shrinks_only_when_settled() {
+        assert!(region_active(true, false, 0.0, 0.0), "마우스가 위에 있으면 활성");
+        assert!(region_active(false, false, 0.3, 0.0), "확대가 남아 있으면 활성");
+        assert!(region_active(false, false, 0.0, 0.2), "말풍선이 사라지는 중이면 활성");
+        assert!(region_active(false, true, 0.0, 0.0), "끌기·옮기기 중이면 활성");
+        assert!(!region_active(false, false, 0.0, 0.0), "모두 끝나면 쉼");
     }
 
     #[test]
