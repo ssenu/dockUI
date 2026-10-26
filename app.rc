@@ -1,3 +1,0 @@
-// 앱 아이콘(리소스 1번)과 매니페스트(DPI 인식, 공용 컨트롤 v6)
-1 ICON "assets/icon.ico"
-1 24 "assets/app.manifest"

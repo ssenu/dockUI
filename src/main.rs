@@ -34,6 +34,11 @@ fn main() {
         return;
     }
 
+    // 알림 머리글에 설치 바로가기 이름(Dock UI)·아이콘이 쓰이게 앱 ID를 고정한다
+    let _ = unsafe {
+        windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(&windows::core::HSTRING::from(app::APP_ID))
+    };
+
     // 셸·COM 기능(ShellExecute, 앱 목록, WIC)과 끌어 놓기(OLE)를 위해 UI 스레드를 OLE(STA)로 초기화한다
     if let Err(e) = unsafe { windows::Win32::System::Ole::OleInitialize(None) } {
         logging::warn(&format!("OLE 초기화 실패 (끌어 놓기 꺼짐): {e}"));

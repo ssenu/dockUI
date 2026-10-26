@@ -37,6 +37,8 @@ use windows::core::{HSTRING, w};
 
 /// 화면에 보이는 이름 (exe·설치 파일·데이터 폴더 이름은 업데이트 호환을 위해 그대로 둔다)
 pub const APP_NAME: &str = "Dock UI";
+/// 알림·작업 표시줄이 이 앱을 알아보는 ID (설치 바로가기에도 같은 값)
+pub const APP_ID: &str = "ssenu.DockUI";
 pub const BYLINE: &str = "by_ssenu";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const RELEASES_URL: &str = "https://github.com/ssenu/dockUI/releases/latest";
