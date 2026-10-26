@@ -6,21 +6,23 @@ use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
 use crate::ui::gfx::{Align, Gfx, Weight};
 use crate::ui::layout::{PANEL_HOVER_SCALE, PICKER_RADIUS, PanelLayout, Pt, RectF, SWATCH, fan_points};
 use crate::ui::theme::{ACCENT, Color, FALLBACK_ALPHA, PICKER_ORDER, Palette, TOOLTIP_BG, TOOLTIP_TEXT};
+use std::path::PathBuf;
 
 pub const WINDOW_RADIUS: f32 = 8.0;
 pub const ICON_RADIUS: f32 = 14.0;
 pub const TITLE: &str = "YT Launcher";
 pub const BYLINE: &str = "by_ssenu";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TileKind {
+    #[default]
     Youtube,
     App,
     Web,
 }
 
 /// 화면에 그릴 항목 하나
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TileView {
     pub id: String,
     /// 말풍선에 보이는 이름
@@ -28,6 +30,12 @@ pub struct TileView {
     /// 유튜브 아이콘 아래 두 글자 배지 (다른 종류는 아바타 글자)
     pub badge: String,
     pub kind: TileKind,
+    /// 캐시된 아이콘 PNG (앱 아이콘, 사이트 파비콘). 없으면 글자 아바타
+    pub icon: Option<PathBuf>,
+    /// 실행 중인 앱이면 아이콘 아래 점
+    pub running: bool,
+    /// 실행 대상을 찾지 못한 앱 (흐리게)
+    pub missing: bool,
 }
 
 pub struct DragView {
@@ -93,10 +101,47 @@ fn draw_letter_icon(g: &Gfx, r: RectF, seed: &str, letter: &str) {
 }
 
 fn draw_tile(g: &Gfx, tile: &TileView, r: RectF, lift: f32) {
-    g.soft_shadow(r, ICON_RADIUS * r.w / 56.0, 1.0 + lift);
-    match tile.kind {
-        TileKind::Youtube => draw_youtube_icon(g, r, &tile.badge),
-        TileKind::App | TileKind::Web => draw_letter_icon(g, r, &tile.id, &tile.badge),
+    let radius = ICON_RADIUS * r.w / 56.0;
+    let opacity = if tile.missing { 0.4 } else { 1.0 };
+    // 앱 아이콘은 자체 모양(투명 배경)이 있으므로 그림자 없이 그대로 그린다
+    if tile.kind == TileKind::App
+        && let Some(path) = &tile.icon
+        && g.image(path, r, opacity)
+    {
+        return;
+    }
+    g.soft_shadow(r, radius, 1.0 + lift);
+    match (tile.kind, &tile.icon) {
+        (TileKind::Youtube, _) => draw_youtube_icon(g, r, &tile.badge),
+        // 사이트 아이콘은 작아서 흰 둥근 판 위에 올린다
+        (TileKind::Web, Some(path)) => {
+            g.fill_round_rect(r, radius, Color::hex(0xFFFFFF, 0.96));
+            if !g.image(path, r.scaled(0.58), 1.0) {
+                draw_letter_icon(g, r, &tile.id, &tile.badge);
+            }
+        }
+        _ => draw_letter_icon(g, r, &tile.id, &tile.badge),
+    }
+    // 실행 대상을 찾지 못한 항목은 흐리게
+    if tile.missing {
+        g.fill_round_rect(r, radius, Color::hex(0x808080, 0.55));
+    }
+}
+
+/// 실행 중 표시 점. `toward`는 점을 놓을 쪽(아이콘 바깥) 방향 단위 벡터.
+fn draw_running_dot(g: &Gfx, r: RectF, toward: (f32, f32), c: Color) {
+    let center = r.center();
+    let gap = 5.0;
+    let p = Pt { x: center.x + toward.0 * (r.w / 2.0 + gap), y: center.y + toward.1 * (r.h / 2.0 + gap) };
+    g.fill_circle(p, 2.2, c);
+}
+
+fn dock_dot_direction(edge: DockEdge) -> (f32, f32) {
+    match edge {
+        DockEdge::Bottom => (0.0, 1.0),
+        DockEdge::Top => (0.0, -1.0),
+        DockEdge::Left => (-1.0, 0.0),
+        DockEdge::Right => (1.0, 0.0),
     }
 }
 
@@ -217,6 +262,9 @@ pub fn draw(g: &Gfx, s: &SceneState) {
         let press = if s.pressed == Some(slot) && s.drag.is_none() { 0.04 } else { 0.0 };
         let r = s.layout.cells[slot].scaled(1.0 + (PANEL_HOVER_SCALE - 1.0) * level - press);
         draw_tile(g, &s.tiles[tile_index], r, level);
+        if s.tiles[tile_index].running {
+            draw_running_dot(g, s.layout.cells[slot], (0.0, 1.0), p.text.with_alpha(0.75));
+        }
     }
     let add_slot = s.tiles.len();
     let add_level = s.hover.get(add_slot).copied().unwrap_or(0.0);
@@ -324,6 +372,9 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
                     r = r.scaled(0.94);
                 }
                 draw_tile(g, &s.tiles[*t], r, s.mag.scales[i] - 1.0);
+                if s.tiles[*t].running {
+                    draw_running_dot(g, r, dock_dot_direction(s.layout.edge), p.text.with_alpha(0.8));
+                }
             }
             Slot::Add => draw_add(g, r, p),
             Slot::Palette => draw_palette_button(g, r.scaled(0.84), p, s.palette_hover),
@@ -380,11 +431,35 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let tiles = vec![
             TileView {
-                id: "1".into(), label: "로파이 음악".into(), badge: "로파".into(), kind: TileKind::Youtube
+                id: "1".into(),
+                label: "로파이 음악".into(),
+                badge: "로파".into(),
+                kind: TileKind::Youtube,
+                ..Default::default()
             },
-            TileView { id: "2".into(), label: "아침 뉴스".into(), badge: "뉴스".into(), kind: TileKind::Youtube },
-            TileView { id: "3".into(), label: "github.com".into(), badge: "G".into(), kind: TileKind::Web },
-            TileView { id: "4".into(), label: "계산기".into(), badge: "계".into(), kind: TileKind::App },
+            TileView {
+                id: "2".into(),
+                label: "아침 뉴스".into(),
+                badge: "뉴스".into(),
+                kind: TileKind::Youtube,
+                ..Default::default()
+            },
+            TileView {
+                id: "3".into(),
+                label: "github.com".into(),
+                badge: "G".into(),
+                kind: TileKind::Web,
+                ..Default::default()
+            },
+            TileView {
+                id: "4".into(),
+                label: "계산기".into(),
+                badge: "계".into(),
+                kind: TileKind::App,
+                icon: Some(std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"))),
+                running: true,
+                missing: false,
+            },
         ];
         let layout = PanelLayout::compute(360.0, 480.0, tiles.len());
         for (i, theme) in PICKER_ORDER.iter().enumerate() {
@@ -425,11 +500,36 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let tiles = vec![
             TileView {
-                id: "1".into(), label: "로파이 음악".into(), badge: "로파".into(), kind: TileKind::Youtube
+                id: "1".into(),
+                label: "로파이 음악".into(),
+                badge: "로파".into(),
+                kind: TileKind::Youtube,
+                ..Default::default()
             },
-            TileView { id: "2".into(), label: "아침 뉴스".into(), badge: "뉴스".into(), kind: TileKind::Youtube },
-            TileView { id: "3".into(), label: "github.com".into(), badge: "G".into(), kind: TileKind::Web },
-            TileView { id: "4".into(), label: "계산기".into(), badge: "계".into(), kind: TileKind::App },
+            TileView {
+                id: "2".into(),
+                label: "아침 뉴스".into(),
+                badge: "뉴스".into(),
+                kind: TileKind::Youtube,
+                ..Default::default()
+            },
+            TileView {
+                id: "3".into(),
+                label: "github.com".into(),
+                badge: "G".into(),
+                kind: TileKind::Web,
+                missing: true,
+                ..Default::default()
+            },
+            TileView {
+                id: "4".into(),
+                label: "계산기".into(),
+                badge: "계".into(),
+                kind: TileKind::App,
+                icon: Some(std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"))),
+                running: true,
+                missing: false,
+            },
         ];
         for (edge, name) in [(DockEdge::Bottom, "bottom"), (DockEdge::Left, "left")] {
             let layout = DockLayout::compute(edge, tiles.len());

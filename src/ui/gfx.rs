@@ -4,7 +4,10 @@
 
 use crate::ui::layout::{Pt, RectF};
 use crate::ui::theme::Color;
-use windows::Win32::Foundation::{HMODULE, HWND};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use windows::Win32::Foundation::{GENERIC_READ, HMODULE, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
     D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
@@ -13,8 +16,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
     D2D1_BITMAP_PROPERTIES1, D2D1_BRUSH_PROPERTIES, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext,
-    ID2D1Factory1, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1RenderTarget,
+    ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -37,7 +41,11 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice,
     IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
 };
-use windows::Win32::Graphics::Imaging::{IWICBitmap, IWICImagingFactory};
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppPBGRA, IWICBitmap, IWICImagingFactory,
+    WICBitmapDitherTypeNone, WICBitmapPaletteTypeMedianCut, WICDecodeMetadataCacheOnDemand,
+};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::core::{HSTRING, Interface, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -141,6 +149,8 @@ pub struct Gfx {
     width: u32,
     height: u32,
     scale: f32,
+    /// 아이콘 이미지 캐시 (불러오기 실패도 기억해 매 프레임 다시 읽지 않는다)
+    images: RefCell<HashMap<PathBuf, Option<ID2D1Bitmap>>>,
 }
 
 fn text_resources() -> Result<(IDWriteFactory5, Option<IDWriteFontCollection1>)> {
@@ -184,7 +194,8 @@ impl Gfx {
             let (dwrite, fonts) = text_resources()?;
             let surface =
                 Surface::Window { swap, target_bitmap: None, _dcomp: dcomp, _target: target, _visual: visual };
-            let mut gfx = Gfx { factory, dwrite, fonts, ctx, surface, width, height, scale };
+            let mut gfx =
+                Gfx { factory, dwrite, fonts, ctx, surface, width, height, scale, images: RefCell::default() };
             gfx.bind_target()?;
             Ok(gfx)
         }
@@ -327,6 +338,56 @@ impl Gfx {
         }
     }
 
+    fn load_image(&self, path: &Path) -> Option<ID2D1Bitmap> {
+        // SAFETY: WIC로 파일을 읽어 미리 곱한 BGRA로 바꾼 뒤 Direct2D 비트맵으로 올린다
+        unsafe {
+            let wic: IWICImagingFactory =
+                CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+            // 아이콘 캐시는 늘 PNG: 형식 자동 판별(모든 코덱 불러오기)을 피한다
+            let stream = wic.CreateStream().ok()?;
+            stream.InitializeFromFilename(&HSTRING::from(path.as_os_str()), GENERIC_READ.0).ok()?;
+            let decoder = wic.CreateDecoder(&GUID_ContainerFormatPng, std::ptr::null()).ok()?;
+            decoder.Initialize(&stream, WICDecodeMetadataCacheOnDemand).ok()?;
+            let frame = decoder.GetFrame(0).ok()?;
+            let converter = wic.CreateFormatConverter().ok()?;
+            converter
+                .Initialize(
+                    &frame,
+                    &GUID_WICPixelFormat32bppPBGRA,
+                    WICBitmapDitherTypeNone,
+                    None,
+                    0.0,
+                    WICBitmapPaletteTypeMedianCut,
+                )
+                .ok()?;
+            self.ctx.CreateBitmapFromWicBitmap(&converter, None).ok().map(|b| b.into())
+        }
+    }
+
+    /// 아이콘 파일을 사각형에 맞춰 그린다. 파일이 없거나 읽지 못하면 false.
+    pub fn image(&self, path: &Path, r: RectF, opacity: f32) -> bool {
+        let mut cache = self.images.borrow_mut();
+        let bitmap = cache.entry(path.to_path_buf()).or_insert_with(|| self.load_image(path));
+        let Some(bitmap) = bitmap else { return false };
+        // SAFETY: 캐시된 비트맵을 고품질 보간으로 그린다
+        unsafe {
+            self.ctx.DrawBitmap(
+                &*bitmap,
+                Some(&rect(r)),
+                opacity,
+                D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                None,
+                None,
+            )
+        };
+        true
+    }
+
+    /// 아이콘 파일이 바뀌었을 수 있을 때 (항목 목록이 바뀔 때) 캐시를 비운다.
+    pub fn clear_images(&self) {
+        self.images.borrow_mut().clear();
+    }
+
     /// 채운 다각형 (재생 삼각형 등)
     pub fn fill_polygon(&self, points: &[Pt], c: Color) {
         let (Some(first), Some(brush)) = (points.first(), self.brush(c)) else { return };
@@ -443,7 +504,8 @@ mod offscreen {
                 let rt = factory.CreateWicBitmapRenderTarget(&bitmap, &props)?;
                 let ctx: ID2D1DeviceContext = rt.cast()?;
                 let (dwrite, fonts) = text_resources()?;
-                Ok(Gfx { factory, dwrite, fonts, ctx, surface: Surface::Image { wic, bitmap }, width, height, scale })
+                let surface = Surface::Image { wic, bitmap };
+                Ok(Gfx { factory, dwrite, fonts, ctx, surface, width, height, scale, images: RefCell::default() })
             }
         }
 

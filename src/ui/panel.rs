@@ -751,9 +751,17 @@ impl Panel {
     fn apply(&mut self, cmd: PanelCmd) {
         match cmd {
             PanelCmd::SetTiles(tiles) => {
+                // 실행 중 점·아이콘만 바뀐 경우(같은 항목 순서)는 마우스 상태를 그대로 둔다
+                let same_items =
+                    tiles.len() == self.tiles.len() && tiles.iter().zip(&self.tiles).all(|(a, b)| a.id == b.id);
                 self.tiles = tiles;
-                self.hover = vec![Anim::at(0.0); self.tiles.len() + 1];
-                self.hover_hit = Hit::Empty;
+                if let Some(gfx) = &self.gfx {
+                    gfx.clear_images();
+                }
+                if !same_items {
+                    self.hover = vec![Anim::at(0.0); self.tiles.len() + 1];
+                    self.hover_hit = Hit::Empty;
+                }
                 self.layout = PanelLayout::compute(self.layout.width, self.layout.height, self.tiles.len());
                 if self.mode == Mode::Dock {
                     self.place_windows();

@@ -7,6 +7,8 @@ mod apps;
 mod autostart;
 mod chrome;
 mod config;
+#[allow(dead_code)] // 앱·웹 항목 연결(Task 4)에서 지운다
+mod icons;
 mod items;
 mod logging;
 mod tray;

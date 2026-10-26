@@ -106,7 +106,7 @@ pub fn tile_views(items: &[Item]) -> Vec<TileView> {
                 Item::App { .. } => (TileKind::App, label.chars().take(1).collect()),
                 Item::Web { .. } => (TileKind::Web, label.chars().take(1).collect::<String>().to_uppercase()),
             };
-            TileView { id: item.id().to_string(), label, badge, kind }
+            TileView { id: item.id().to_string(), label, badge, kind, ..Default::default() }
         })
         .collect()
 }
@@ -618,7 +618,11 @@ mod tests {
         assert_eq!(
             views[0],
             TileView {
-                id: "y".into(), label: "로파이 음악".into(), badge: "로파".into(), kind: TileKind::Youtube
+                id: "y".into(),
+                label: "로파이 음악".into(),
+                badge: "로파".into(),
+                kind: TileKind::Youtube,
+                ..Default::default()
             }
         );
         assert_eq!(
