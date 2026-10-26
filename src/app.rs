@@ -2,12 +2,12 @@
 
 use crate::autostart::{AutoStart, RegistryRun};
 use crate::chrome;
-use crate::config::{Config, LoadReport, Storage, Theme};
+use crate::config::{Config, DockEdge, LoadReport, Mode, Storage, Theme};
 use crate::items::Item;
 use crate::logging;
 use crate::tray::{Tray, WM_APP_TRAY};
 use crate::ui::dialogs::{YoutubeInput, youtube_dialog};
-use crate::ui::panel::{Panel, PanelCmd, PanelHandle, UiEvent, initial_rect};
+use crate::ui::panel::{OpenSpec, Panel, PanelCmd, PanelHandle, UiEvent, initial_rect};
 use crate::ui::scene::{TileKind, TileView, badge_of};
 use crate::updater::{self, Release, UreqHttp};
 use crate::win::instance::WM_APP_SHOW;
@@ -40,6 +40,12 @@ const DAILY_CHECK_MS: u32 = 24 * 60 * 60 * 1000;
 const CLICK_DEBOUNCE: Duration = Duration::from_secs(1);
 
 const CMD_SHOW: u32 = 20;
+const CMD_MODE_DOCK: u32 = 30;
+const CMD_MODE_PANEL: u32 = 31;
+const CMD_EDGE_BOTTOM: u32 = 32;
+const CMD_EDGE_TOP: u32 = 33;
+const CMD_EDGE_LEFT: u32 = 34;
+const CMD_EDGE_RIGHT: u32 = 35;
 const CMD_RESET_GEOMETRY: u32 = 21;
 const CMD_LOCK: u32 = 22;
 const CMD_AUTOSTART: u32 = 10;
@@ -228,8 +234,15 @@ impl App {
     fn open_panel(&mut self) {
         let send = self.post_event();
         let notify = Box::new(move |e: UiEvent| send(Event::Ui(e)));
-        let rect = initial_rect(self.config.panel_window);
-        match Panel::open(rect, self.config.theme, self.config.locked, tile_views(&self.config.items), notify) {
+        let spec = OpenSpec {
+            mode: self.config.mode,
+            edge: self.config.dock_edge,
+            panel_rect: initial_rect(self.config.panel_window),
+            theme: self.config.theme,
+            locked: self.config.locked,
+            tiles: tile_views(&self.config.items),
+        };
+        match Panel::open(spec, notify) {
             Ok(handle) => self.panel = Some(handle),
             Err(e) => logging::error(&format!("패널 창을 만들지 못했습니다: {e}")),
         }
@@ -320,6 +333,13 @@ impl App {
         });
     }
 
+    fn set_mode(&mut self, mode: Mode, edge: DockEdge) {
+        self.config.mode = mode;
+        self.config.dock_edge = edge;
+        self.save();
+        self.panel_send(PanelCmd::SetMode(mode, edge));
+    }
+
     fn set_theme(&mut self, theme: Theme) {
         self.config.theme = theme;
         self.save();
@@ -402,16 +422,34 @@ impl App {
     }
 
     fn menu_entries(&self) -> Vec<MenuEntry> {
+        let dock = self.config.mode == Mode::Dock;
+        let edge = self.config.dock_edge;
         let mut entries = vec![
             MenuEntry::label(format!("{APP_NAME}  {BYLINE}  v{CURRENT_VERSION}")),
             MenuEntry::Separator,
             MenuEntry::item(CMD_SHOW, "런처 보이기"),
-            MenuEntry::item(CMD_RESET_GEOMETRY, "위치·크기 초기화"),
-            MenuEntry::checked(CMD_LOCK, "위치 잠금", self.config.locked),
+            MenuEntry::Separator,
+            MenuEntry::checked(CMD_MODE_DOCK, "독 모드", dock),
+            MenuEntry::checked(CMD_MODE_PANEL, "패널 모드", !dock),
+        ];
+        if dock {
+            entries.extend([
+                MenuEntry::checked(CMD_EDGE_BOTTOM, "    독 위치: 아래", edge == DockEdge::Bottom),
+                MenuEntry::checked(CMD_EDGE_TOP, "    독 위치: 위", edge == DockEdge::Top),
+                MenuEntry::checked(CMD_EDGE_LEFT, "    독 위치: 왼쪽", edge == DockEdge::Left),
+                MenuEntry::checked(CMD_EDGE_RIGHT, "    독 위치: 오른쪽", edge == DockEdge::Right),
+            ]);
+        } else {
+            entries.extend([
+                MenuEntry::item(CMD_RESET_GEOMETRY, "위치·크기 초기화"),
+                MenuEntry::checked(CMD_LOCK, "위치 잠금", self.config.locked),
+            ]);
+        }
+        entries.extend([
             MenuEntry::Separator,
             MenuEntry::checked(CMD_AUTOSTART, "윈도우 시작 시 실행", self.autostart.is_enabled()),
             MenuEntry::item(CMD_CHECK_UPDATE, "업데이트 확인"),
-        ];
+        ]);
         if let Some(r) = &self.release {
             let text = if self.downloading {
                 "업데이트 내려받는 중…".to_string()
@@ -431,6 +469,12 @@ impl App {
     fn show_menu(&mut self) {
         match show_popup(self.hwnd, &self.menu_entries()) {
             CMD_SHOW => self.panel_send(PanelCmd::Show),
+            CMD_MODE_DOCK => self.set_mode(Mode::Dock, self.config.dock_edge),
+            CMD_MODE_PANEL => self.set_mode(Mode::Panel, self.config.dock_edge),
+            CMD_EDGE_BOTTOM => self.set_mode(Mode::Dock, DockEdge::Bottom),
+            CMD_EDGE_TOP => self.set_mode(Mode::Dock, DockEdge::Top),
+            CMD_EDGE_LEFT => self.set_mode(Mode::Dock, DockEdge::Left),
+            CMD_EDGE_RIGHT => self.set_mode(Mode::Dock, DockEdge::Right),
             CMD_RESET_GEOMETRY => self.panel_send(PanelCmd::ResetGeometry),
             CMD_LOCK => {
                 self.config.locked = !self.config.locked;
