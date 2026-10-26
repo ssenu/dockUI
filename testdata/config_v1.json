@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "tiles": [
+    {"query": "로파이 음악", "name": "", "color": "#E53935", "id": "0f3c9a8e2b7d4c1e9a6b5d4c3b2a1f0e"},
+    {"query": "뉴스", "name": "아침 뉴스", "color": "", "id": "1a2b3c4d5e6f708192a3b4c5d6e7f809"}
+  ],
+  "window": {"x": 1544, "y": 16, "w": 360, "h": 480},
+  "locked": true,
+  "autostart": false,
+  "last_run_version": "0.1.4",
+  "notified_version": "0.1.4",
+  "chrome_notice_shown": true,
+  "theme": "sepia"
+}
