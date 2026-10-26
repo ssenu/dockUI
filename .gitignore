@@ -1,9 +1,6 @@
-__pycache__/
-*.pyc
+/target/
+dist/
+# 0.1.x(파이썬) 개발 때 쓰던 로컬 폴더
 .venv/
 build/
-dist/
-installer/Output/
-.pytest_cache/
-*.spec
-/target/
+__pycache__/
