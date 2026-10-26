@@ -10,6 +10,7 @@ mod config;
 mod items;
 mod logging;
 mod tray;
+mod ui;
 mod updater;
 mod win;
 
