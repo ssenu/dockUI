@@ -4,6 +4,7 @@ pub mod anim;
 pub mod app_list;
 pub mod dialogs;
 pub mod dock_layout;
+pub mod drop;
 pub mod form;
 pub mod gfx;
 pub mod layout;

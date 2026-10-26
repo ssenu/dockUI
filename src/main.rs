@@ -34,10 +34,10 @@ fn main() {
         return;
     }
 
-    // 셸·COM을 쓰는 기능(ShellExecute, 4단계의 앱 목록)을 위해 UI 스레드를 STA로 초기화한다
-    let _ = unsafe {
-        windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
-    };
+    // 셸·COM 기능(ShellExecute, 앱 목록, WIC)과 끌어 놓기(OLE)를 위해 UI 스레드를 OLE(STA)로 초기화한다
+    if let Err(e) = unsafe { windows::Win32::System::Ole::OleInitialize(None) } {
+        logging::warn(&format!("OLE 초기화 실패 (끌어 놓기 꺼짐): {e}"));
+    }
 
     let app = app::App::new(config::Storage::new(&data_dir));
     if let Err(e) = win::msg_window::create(MESSAGE_CLASS, Box::new(app)) {

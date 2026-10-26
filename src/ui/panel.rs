@@ -11,6 +11,7 @@ use crate::config::{DockEdge, Mode, Rect, Theme};
 use crate::logging;
 use crate::ui::anim::{Anim, Tween};
 use crate::ui::dock_layout::{self, DockLayout, Magnified};
+use crate::ui::drop::{self, Dropped};
 use crate::ui::gfx::Gfx;
 use crate::ui::layout::{
     EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, Hit, MIN_H, MIN_W, PanelLayout, Pt, RectF, SWATCH,
@@ -69,6 +70,10 @@ pub enum PanelCmd {
     Show,
     ResetGeometry,
     Close,
+    /// 끌어 놓기 대상 위에 받을 수 있는 것이 올라옴 / 떠남 (강조 표시)
+    DropHover(bool),
+    /// 끌어다 놓은 파일·주소 (앱에 그대로 넘긴다)
+    Dropped(Vec<Dropped>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +87,8 @@ pub enum UiEvent {
     /// 패널 모드에서 위치·크기가 바뀜
     GeometryChanged(Rect),
     MenuRequested,
+    /// 독·패널에 파일·주소를 끌어다 놓음
+    Dropped(Vec<Dropped>),
 }
 
 /// 처음 화면을 열 때 필요한 값
@@ -174,6 +181,10 @@ pub struct Panel {
     locked: bool,
     animating: bool,
     rx: Receiver<PanelCmd>,
+    /// 끌어 놓기 대상이 화면에 명령을 보낼 채널
+    tx: Sender<PanelCmd>,
+    /// 끌어 놓을 수 있는 것이 위에 있음
+    drop_hover: bool,
     notify: Box<dyn Fn(UiEvent)>,
 }
 
@@ -272,6 +283,8 @@ impl Panel {
             locked: spec.locked,
             animating: false,
             rx,
+            tx: tx.clone(),
+            drop_hover: false,
             notify,
         };
         let glass = create_window(&glass_spec, Box::new(panel))?;
@@ -305,6 +318,8 @@ impl Panel {
             Err(e) => logging::error(&format!("콘텐츠 창을 만들지 못했습니다: {e}")),
         }
         self.place_windows();
+        // 콘텐츠 창이 유리 창을 덮고 있어 다른 프로세스에서 끌어 오면 콘텐츠 창이 놓을 곳이 된다: 둘 다 등록
+        drop::register(&[self.glass, self.content], self.glass, self.tx.clone());
         unsafe {
             let _ = ShowWindow(self.glass, SW_SHOWNOACTIVATE);
             let _ = ShowWindow(self.content, SW_SHOWNOACTIVATE);
@@ -445,8 +460,28 @@ impl Panel {
         }
     }
 
+    /// 한 프레임 그리기. 그래픽 장치를 잃었으면(절전 복귀, 드라이버 재시작 등) 장치를 다시 만들고 한 번 더 그린다.
     fn render(&mut self) {
-        let Some(gfx) = &self.gfx else { return };
+        if let Err(e) = self.draw_frame() {
+            logging::warn(&format!("그리기 실패, 그리기 장치를 다시 만듭니다: {e}"));
+            self.recreate_gfx();
+            if let Err(e) = self.draw_frame() {
+                logging::error(&format!("다시 만든 장치로도 그리지 못했습니다: {e}"));
+            }
+        }
+    }
+
+    fn recreate_gfx(&mut self) {
+        self.gfx = None;
+        let (_, _, w, h) = screen_rect(self.content);
+        match Gfx::new(self.content, w as u32, h as u32, self.scale) {
+            Ok(gfx) => self.gfx = Some(gfx),
+            Err(e) => logging::error(&format!("그리기 장치를 다시 만들지 못했습니다: {e}")),
+        }
+    }
+
+    fn draw_frame(&self) -> windows::core::Result<()> {
+        let Some(gfx) = &self.gfx else { return Ok(()) };
         let picker = if self.picker_open { self.picker.progress() } else { 0.0 };
         let pressed = match &self.press {
             Some(Press { hit: Hit::Tile(i), .. }) => Some(*i),
@@ -476,6 +511,7 @@ impl Panel {
                     picker,
                     picker_hover: self.picker_hover,
                     theme: self.theme,
+                    drop_hover: self.drop_hover,
                 };
                 scene::draw(gfx, &state);
             }
@@ -493,13 +529,12 @@ impl Panel {
                     pressed,
                     tooltip: self.dock_tooltip(),
                     drag: self.drag,
+                    drop_hover: self.drop_hover,
                 };
                 scene::draw_dock(gfx, &state);
             }
         }
-        if let Err(e) = gfx.end() {
-            logging::warn(&format!("그리기 실패: {e}"));
-        }
+        gfx.end()
     }
 
     fn start_animation(&mut self) {
@@ -768,8 +803,10 @@ impl Panel {
                 // 실행 중 점·아이콘만 바뀐 경우(같은 항목 순서)는 마우스 상태를 그대로 둔다
                 let same_items =
                     tiles.len() == self.tiles.len() && tiles.iter().zip(&self.tiles).all(|(a, b)| a.id == b.id);
+                // 아이콘 캐시는 항목·아이콘 파일이 바뀔 때만 비운다 (실행 중 점만 바뀐 경우는 그대로)
+                let same_icons = same_items && tiles.iter().zip(&self.tiles).all(|(a, b)| a.icon == b.icon);
                 self.tiles = tiles;
-                if let Some(gfx) = &self.gfx {
+                if !same_icons && let Some(gfx) = &self.gfx {
                     gfx.clear_images();
                 }
                 if !same_items {
@@ -814,7 +851,15 @@ impl Panel {
                 self.place_windows();
                 self.render();
             }
+            PanelCmd::DropHover(on) => {
+                if on != self.drop_hover {
+                    self.drop_hover = on;
+                    self.render();
+                }
+            }
+            PanelCmd::Dropped(items) => self.emit(UiEvent::Dropped(items)),
             PanelCmd::Close => {
+                drop::revoke(&[self.glass, self.content]);
                 let _ = unsafe { DestroyWindow(self.content) };
                 let _ = unsafe { DestroyWindow(self.glass) };
             }

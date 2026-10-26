@@ -5,11 +5,12 @@ use crate::autostart::{AutoStart, RegistryRun};
 use crate::chrome;
 use crate::config::{Config, DockEdge, LoadReport, Mode, Storage, Theme};
 use crate::icons::{FETCH_ARG, icon_path, missing_icons};
-use crate::items::{Item, new_id};
+use crate::items::{Item, new_id, normalize_url};
 use crate::logging;
 use crate::tray::{Tray, WM_APP_TRAY};
 use crate::ui::app_list::AppChoice;
 use crate::ui::dialogs::{Initial, ItemInput, item_dialog};
+use crate::ui::drop::Dropped;
 use crate::ui::panel::{OpenSpec, Panel, PanelCmd, PanelHandle, UiEvent, initial_rect};
 use crate::ui::scene::{TileKind, TileView, badge_of};
 use crate::ui::theme::{self, PICKER_ORDER};
@@ -79,6 +80,8 @@ pub enum Event {
         result: Result<Option<Release>, String>,
     },
     Downloaded(Result<PathBuf, String>),
+    /// 업데이트 내려받기 진행률 (0..=100)
+    Progress(u8),
     Ui(UiEvent),
     Opened(chrome::Opened),
     /// 아이콘 캐시에 새 파일이 생김
@@ -225,13 +228,83 @@ unsafe extern "system" fn on_window_event(
 }
 
 /// 새 버전 업데이트 단추. 내려받는 중이면 배지·이름으로 알린다.
-fn update_tile(version: &str, downloading: bool) -> TileView {
-    let (label, badge) = if downloading {
-        ("업데이트 내려받는 중…".to_string(), "받는 중".to_string())
-    } else {
-        (format!("새 버전 v{version} 설치"), format!("v{version}"))
+fn update_tile(version: &str, downloading: bool, progress: Option<u8>) -> TileView {
+    let (label, badge) = match (downloading, progress) {
+        (true, Some(p)) => (format!("업데이트 내려받는 중… {p}%"), format!("{p}%")),
+        (true, None) => ("업데이트 내려받는 중…".to_string(), "받는 중".to_string()),
+        (false, _) => (format!("새 버전 v{version} 설치"), format!("v{version}")),
     };
     TileView { id: UPDATE_TILE_ID.to_string(), label, badge, kind: TileKind::Update, ..Default::default() }
+}
+
+/// 끌어다 놓은 것 → 입력 (exe·바로가기는 앱, .url 파일과 주소는 웹). 그 밖은 None.
+fn input_from_drop(d: &Dropped) -> Option<ItemInput> {
+    match d {
+        Dropped::Url(url) => normalize_url(url).ok().map(|url| ItemInput::Web { url, name: String::new() }),
+        Dropped::File(path) => {
+            let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            match ext.as_str() {
+                "exe" | "lnk" | "appref-ms" => Some(ItemInput::App {
+                    app: crate::win::shell_items::file_app(&path.to_string_lossy()),
+                    name: String::new(),
+                }),
+                "url" => {
+                    let text = std::fs::read_to_string(path).ok()?;
+                    let url = internet_shortcut_url(&text)?;
+                    normalize_url(&url).ok().map(|url| ItemInput::Web { url, name: String::new() })
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// 인터넷 바로가기(.url) 파일의 `URL=` 줄 (순수 함수)
+fn internet_shortcut_url(text: &str) -> Option<String> {
+    text.lines().find_map(|l| l.trim().strip_prefix("URL=")).map(|u| u.trim().to_string()).filter(|u| !u.is_empty())
+}
+
+/// 같은 앱·같은 주소를 가리키는 항목인가 (순수 함수)
+fn same_target(a: &Item, b: &Item) -> bool {
+    match (a, b) {
+        (Item::App { target: x, .. }, Item::App { target: y, .. }) => x.eq_ignore_ascii_case(y),
+        (Item::Web { url: x, .. }, Item::Web { url: y, .. }) => x.trim_end_matches('/') == y.trim_end_matches('/'),
+        _ => false,
+    }
+}
+
+/// 끌어 놓기 결과 알림 문구 (순수 함수)
+fn drop_message(added: usize, duplicate: usize, unsupported: usize) -> String {
+    let mut parts = Vec::new();
+    if added > 0 {
+        parts.push(format!("{added}개 항목을 추가했습니다."));
+    }
+    if duplicate > 0 {
+        parts.push(format!("이미 있는 {duplicate}개는 건너뛰었습니다."));
+    }
+    if unsupported > 0 {
+        parts.push(format!("앱(exe·바로가기)과 웹 주소만 추가할 수 있어 {unsupported}개는 건너뛰었습니다."));
+    }
+    parts.join(" ")
+}
+
+/// 내려받은 양 → 0..=100 (전체 크기를 모르면 None)
+fn percent(done: u64, total: u64) -> Option<u8> {
+    (total > 0).then(|| (done.saturating_mul(100) / total).min(100) as u8)
+}
+
+/// 업데이트 확인 질문: 버전 + 바뀐 점(릴리스 본문 요약)
+fn update_question(release: &Release) -> String {
+    let mut text = format!("v{} 버전으로 업데이트할까요?", release.version);
+    let notes = updater::summarize_notes(&release.notes, 8);
+    if !notes.is_empty() {
+        text.push_str("\n\n바뀐 점");
+        for line in notes {
+            text.push_str(&format!("\n • {line}"));
+        }
+    }
+    text.push_str("\n\n런처가 잠시 꺼졌다 켜집니다.");
+    text
 }
 
 /// 화면에서 바뀐 순서(id 목록)대로 항목을 다시 늘어놓는다. 목록에 없는 항목은 뒤에 붙인다.
@@ -274,6 +347,8 @@ pub struct App {
     autostart: AutoStart<RegistryRun>,
     release: Option<Release>,
     downloading: bool,
+    /// 내려받기 진행률 (내려받는 중일 때만)
+    progress: Option<u8>,
     debounce: Debounce,
     events_tx: Sender<Event>,
     events_rx: Receiver<Event>,
@@ -301,6 +376,7 @@ impl App {
             autostart: AutoStart { backend: RegistryRun::default() },
             release: None,
             downloading: false,
+            progress: None,
             debounce: Debounce::default(),
             events_tx,
             events_rx,
@@ -336,7 +412,7 @@ impl App {
         let status = TileStatus { icon_of: &icon_of, running: &self.running, missing: &self.missing };
         let mut tiles = tile_views(&self.config.items, &status);
         if let Some(release) = &self.release {
-            tiles.push(update_tile(&release.version, self.downloading));
+            tiles.push(update_tile(&release.version, self.downloading, self.progress));
         }
         tiles
     }
@@ -502,7 +578,33 @@ impl App {
                 self.save();
             }
             UiEvent::MenuRequested => self.show_menu(),
+            UiEvent::Dropped(dropped) => self.add_dropped(dropped),
         }
+    }
+
+    /// 끌어다 놓은 파일·주소를 항목으로 추가한다 (이미 있는 것과 지원하지 않는 것은 건너뛴다).
+    fn add_dropped(&mut self, dropped: Vec<Dropped>) {
+        let (mut added, mut duplicate, mut unsupported) = (Vec::new(), 0, 0);
+        for d in &dropped {
+            let Some(input) = input_from_drop(d) else {
+                unsupported += 1;
+                continue;
+            };
+            let item = item_from_input(new_id(), input);
+            if self.config.items.iter().chain(&added).any(|i| same_target(i, &item)) {
+                duplicate += 1;
+                continue;
+            }
+            added.push(item);
+        }
+        if !added.is_empty() {
+            self.config.items.extend(added.iter().cloned());
+            self.save();
+            self.update_running();
+            self.refresh_tiles();
+        }
+        self.notify(&drop_message(added.len(), duplicate, unsupported));
+        self.fetch_icons(added);
     }
 
     fn add_item(&mut self) {
@@ -626,21 +728,31 @@ impl App {
         if self.downloading {
             return;
         }
-        let text =
-            HSTRING::from(format!("v{} 버전으로 업데이트할까요?\n런처가 잠시 꺼졌다 켜집니다.", release.version));
+        let text = HSTRING::from(update_question(&release));
         let answer =
             unsafe { MessageBoxW(Some(self.hwnd), &text, &HSTRING::from(APP_NAME), MB_YESNO | MB_ICONQUESTION) };
         if answer != IDYES {
             return;
         }
         self.downloading = true;
+        self.progress = None;
         self.refresh_tiles();
         self.notify("업데이트를 내려받는 중입니다…");
         let send = self.post_event();
+        let report = self.post_event();
         std::thread::spawn(move || {
             let dir = std::env::temp_dir().join("YT-Launcher-update");
             let _ = std::fs::remove_dir_all(&dir);
-            let result = updater::download_and_verify(&UreqHttp::new(), &release, &dir, &mut |_, _| {})
+            // 진행률은 1% 바뀔 때만 알린다
+            let mut last = None;
+            let mut on_progress = |done: u64, total: u64| {
+                let Some(p) = percent(done, total) else { return };
+                if last != Some(p) {
+                    last = Some(p);
+                    report(Event::Progress(p));
+                }
+            };
+            let result = updater::download_and_verify(&UreqHttp::new(), &release, &dir, &mut on_progress)
                 .map_err(|e| e.to_string());
             send(Event::Downloaded(result));
         });
@@ -653,6 +765,7 @@ impl App {
             Err(e) => {
                 logging::error(&format!("업데이트 실패: {e}"));
                 self.downloading = false;
+                self.progress = None;
                 self.refresh_tiles();
                 self.notify(&format!("업데이트에 실패했습니다: {e}"));
             }
@@ -783,6 +896,11 @@ impl Handler for App {
                     match event {
                         Event::Checked { manual, result } => self.on_checked(manual, result),
                         Event::Downloaded(result) => self.on_downloaded(result),
+                        Event::Progress(p) if self.downloading => {
+                            self.progress = Some(p);
+                            self.refresh_tiles();
+                        }
+                        Event::Progress(_) => {}
                         Event::Ui(ui) => self.on_ui(ui),
                         Event::Opened(chrome::Opened::DefaultBrowser) if !self.config.chrome_notice_shown => {
                             self.config.chrome_notice_shown = true;
@@ -844,6 +962,7 @@ mod tests {
             html_url: String::new(),
             installer: installable.then(|| asset.clone()),
             sums: Some(asset),
+            notes: String::new(),
         }
     }
 
@@ -957,12 +1076,49 @@ mod tests {
 
     #[test]
     fn update_tile_shows_version_then_progress() {
-        let t = update_tile("0.3.0", false);
+        let t = update_tile("0.3.0", false, None);
         assert_eq!((t.id.as_str(), t.kind, t.badge.as_str()), (UPDATE_TILE_ID, TileKind::Update, "v0.3.0"));
         assert!(t.label.contains("v0.3.0"));
-        let busy = update_tile("0.3.0", true);
+        let busy = update_tile("0.3.0", true, None);
         assert_eq!(busy.badge, "받는 중");
+        let half = update_tile("0.3.0", true, Some(42));
+        assert_eq!(half.badge, "42%");
+        assert!(half.label.ends_with("42%"));
+        assert_eq!((percent(0, 0), percent(50, 200), percent(300, 200)), (None, Some(25), Some(100)));
         assert!(crate::items::new_id() != UPDATE_TILE_ID);
+    }
+
+    #[test]
+    fn dropped_urls_and_shortcuts_become_web_items() {
+        let web = input_from_drop(&Dropped::Url("https://naver.com".into()));
+        assert_eq!(web, Some(ItemInput::Web { url: "https://naver.com".into(), name: String::new() }));
+        assert_eq!(input_from_drop(&Dropped::File("C:/docs/a.txt".into())), None);
+        assert_eq!(input_from_drop(&Dropped::File("C:/folder".into())), None);
+        let ini = "[InternetShortcut]\r\nURL=https://github.com/ssenu\r\nIconIndex=0";
+        assert_eq!(internet_shortcut_url(ini), Some("https://github.com/ssenu".into()));
+        assert_eq!(internet_shortcut_url("[InternetShortcut]"), None);
+    }
+
+    #[test]
+    fn duplicates_are_detected_by_target() {
+        let web = |url: &str| Item::Web { id: new_id(), url: url.into(), name: String::new() };
+        let app = |t: &str| Item::App { id: new_id(), name: String::new(), target: t.into(), exe: None };
+        assert!(same_target(&web("https://a.com/"), &web("https://a.com")));
+        assert!(!same_target(&web("https://a.com"), &web("https://b.com")));
+        assert!(same_target(&app("C:/X/app.exe"), &app("c:/x/APP.exe")));
+        assert!(!same_target(&app("C:/X/app.exe"), &web("C:/X/app.exe")));
+        assert_eq!(drop_message(2, 0, 0), "2개 항목을 추가했습니다.");
+        assert!(drop_message(0, 1, 1).contains("이미 있는 1개") && drop_message(0, 1, 1).contains("웹 주소만"));
+    }
+
+    #[test]
+    fn update_question_lists_user_facing_changes() {
+        let mut r = release("0.3.0", true);
+        assert_eq!(update_question(&r), "v0.3.0 버전으로 업데이트할까요?\n\n런처가 잠시 꺼졌다 켜집니다.");
+        r.notes = "- feat: 끌어다 놓아 추가\n- ci: 빌드\n- fix: 독이 사라지던 문제".into();
+        let q = update_question(&r);
+        assert!(q.contains("바뀐 점\n • 끌어다 놓아 추가\n • 독이 사라지던 문제\n"));
+        assert!(!q.contains("빌드"));
     }
 
     #[test]

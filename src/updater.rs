@@ -32,6 +32,8 @@ pub struct Release {
     pub html_url: String,
     pub installer: Option<Asset>,
     pub sums: Option<Asset>,
+    /// 릴리스 본문 (마크다운, 바뀐 점 목록)
+    pub notes: String,
 }
 
 impl Release {
@@ -152,7 +154,44 @@ pub fn parse_release(data: &Value) -> Option<Release> {
         html_url: data.get("html_url").and_then(Value::as_str).unwrap_or("").to_string(),
         installer,
         sums,
+        notes: data.get("body").and_then(Value::as_str).unwrap_or("").to_string(),
     })
+}
+
+/// 사용자에게 보일 필요가 없는 커밋 종류 (CI·빌드·문서 등)
+const HIDDEN_KINDS: [&str; 6] = ["ci", "chore", "build", "test", "docs", "refactor"];
+
+/// 릴리스 본문에서 사용자에게 보일 바뀐 점만 뽑는다 (순수 함수).
+/// `- feat: 내용` 같은 목록 줄에서 커밋 종류 머리말과 `by @사람 in 링크` 꼬리를 떼고, 최대 `max`줄.
+/// 더 있으면 마지막 줄에 "외 N개".
+pub fn summarize_notes(body: &str, max: usize) -> Vec<String> {
+    let mut lines: Vec<String> = body
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- ").or_else(|| line.trim().strip_prefix("* ")))
+        .filter(|line| !line.contains("Full Changelog"))
+        .filter_map(|line| {
+            let line = line.split(" by @").next().unwrap_or(line).trim();
+            match line.split_once(": ") {
+                Some((head, rest)) if is_commit_kind(head) => {
+                    let kind = head.split(['(', '!']).next().unwrap_or(head);
+                    (!HIDDEN_KINDS.contains(&kind)).then(|| rest.trim().to_string())
+                }
+                _ => Some(line.to_string()),
+            }
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() > max {
+        let rest = lines.len() - (max - 1);
+        lines.truncate(max - 1);
+        lines.push(format!("외 {rest}개"));
+    }
+    lines
+}
+
+/// `feat`, `fix(ui)`, `feat!` 같은 커밋 종류 머리말인가
+fn is_commit_kind(head: &str) -> bool {
+    !head.is_empty() && head.len() <= 20 && head.chars().all(|c| c.is_ascii_lowercase() || "()!-_".contains(c))
 }
 
 fn version_parts(v: &str) -> Option<Vec<u64>> {
@@ -366,6 +405,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ytl-upd-{}", crate::items::new_id()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn summarizes_notes_for_users() {
+        let body = "## What's Changed\n\
+            - feat: 업데이트 단추 추가\n\
+            - fix(ui): 말풍선 잘림 수정 by @someone in https://github.com/x/y/pull/1\n\
+            - ci: 액션 버전 올림\n\
+            - docs: README\n\
+            * 그냥 문장\n\
+            \n**Full Changelog**: https://github.com/x/y/compare/v1...v2";
+        assert_eq!(summarize_notes(body, 5), vec!["업데이트 단추 추가", "말풍선 잘림 수정", "그냥 문장"]);
+        assert_eq!(summarize_notes(body, 2), vec!["업데이트 단추 추가", "외 2개"]);
+        assert!(summarize_notes("**Full Changelog**: https://x", 5).is_empty());
+        assert_eq!(summarize_notes("- 시간: 3분 단축", 5), vec!["시간: 3분 단축"]);
     }
 
     #[test]

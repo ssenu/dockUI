@@ -64,6 +64,8 @@ pub struct SceneState<'a> {
     pub picker: f32,
     pub picker_hover: Option<usize>,
     pub theme: Theme,
+    /// 끌어 놓을 수 있는 것이 위에 있음 (강조 테두리)
+    pub drop_hover: bool,
 }
 
 /// 문자열에서 앞 두 글자 (배지용)
@@ -319,6 +321,13 @@ fn draw_picker(g: &Gfx, s: &SceneState) {
     draw_swatches(g, &centers, &dirs, s.picker, s.theme, s.picker_hover, bounds);
 }
 
+/// 끌어 놓기 강조: 판 테두리를 강조색으로, 안쪽은 옅게
+fn draw_drop_highlight(g: &Gfx, r: RectF) {
+    g.fill_round_rect(r, WINDOW_RADIUS, ACCENT.with_alpha(0.10));
+    let inner = RectF::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0);
+    g.stroke_round_rect(inner, WINDOW_RADIUS - 1.0, ACCENT, 2.0);
+}
+
 /// 드래그 중이면 놓일 자리 기준으로 항목 순서를 바꿔 보여준다.
 fn display_order(s: &SceneState) -> Vec<usize> {
     let order: Vec<usize> = (0..s.tiles.len()).collect();
@@ -335,6 +344,9 @@ pub fn draw(g: &Gfx, s: &SceneState) {
     let bounds = RectF::new(0.5, 0.5, w - 1.0, h - 1.0);
     g.fill_round_rect(bounds, WINDOW_RADIUS, tint);
     g.stroke_round_rect(bounds, WINDOW_RADIUS, p.divider, 1.0);
+    if s.drop_hover {
+        draw_drop_highlight(g, bounds);
+    }
     draw_header(g, s);
 
     let order = display_order(s);
@@ -384,6 +396,8 @@ pub struct DockScene<'a> {
     pub tooltip: Option<usize>,
     /// 드래그 중인 항목 (번호, 마우스 위치)
     pub drag: Option<(usize, Pt)>,
+    /// 끌어 놓을 수 있는 것이 위에 있음 (강조 테두리)
+    pub drop_hover: bool,
 }
 
 /// 독 말풍선 사각형: 판 반대쪽(화면 안쪽)에 띄운다. 창 영역 계산에도 쓴다.
@@ -417,6 +431,9 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
     let bar = RectF::new(bar.x + 0.5, bar.y + 0.5, bar.w - 1.0, bar.h - 1.0);
     g.fill_round_rect(bar, WINDOW_RADIUS, tint);
     g.stroke_round_rect(bar, WINDOW_RADIUS, p.divider, 1.0);
+    if s.drop_hover {
+        draw_drop_highlight(g, bar);
+    }
 
     for (i, slot) in s.layout.slots().iter().enumerate() {
         let mut r = s.layout.slot_rect(s.mag, s.center, i);
@@ -533,6 +550,7 @@ mod tests {
                 picker: if i == 0 { 1.0 } else { 0.0 },
                 picker_hover: if i == 0 { Some(2) } else { None },
                 theme: *theme,
+                drop_hover: *theme == Theme::Glass,
             };
             gfx.begin();
             draw(&gfx, &state);
@@ -617,6 +635,7 @@ mod tests {
                 pressed: None,
                 tooltip: Some(1),
                 drag: None,
+                drop_hover: false,
             };
             gfx.begin();
             draw_dock(&gfx, &state);

@@ -55,14 +55,14 @@ static FONT_SEMIBOLD: &[u8] = include_bytes!("../../assets/Pretendard-SemiBold.o
 static FONT_BOLD: &[u8] = include_bytes!("../../assets/Pretendard-Bold.otf");
 pub const FONT_FAMILY: &str = "Pretendard";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Weight {
     Regular,
     SemiBold,
     Bold,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Align {
     Leading,
     Center,
@@ -184,7 +184,17 @@ pub struct Gfx {
     scale: f32,
     /// 아이콘 이미지 캐시 (불러오기 실패도 기억해 매 프레임 다시 읽지 않는다)
     images: RefCell<HashMap<PathBuf, Option<ID2D1Bitmap>>>,
+    /// 단색 칠은 브러시 하나를 색만 바꿔 쓴다 (프레임마다 수십 개씩 만들지 않게)
+    solid: ID2D1SolidColorBrush,
+    /// 글자 형식 캐시: (크기, 굵기, 정렬, 줄바꿈)
+    formats: RefCell<HashMap<FormatKey, IDWriteTextFormat>>,
+    /// 한 줄 글자 너비 캐시: (글자, 크기, 굵기)
+    widths: RefCell<HashMap<(String, u32, Weight), f32>>,
 }
+
+type FormatKey = (u32, Weight, Align, bool);
+/// 너비 캐시가 이보다 커지면 비운다 (항목 이름·버전 정도라 보통 수십 개)
+const WIDTH_CACHE_MAX: usize = 512;
 
 fn text_resources() -> Result<(IDWriteFactory5, Option<IDWriteFontCollection1>)> {
     let dwrite: IDWriteFactory5 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
@@ -193,6 +203,33 @@ fn text_resources() -> Result<(IDWriteFactory5, Option<IDWriteFontCollection1>)>
 }
 
 impl Gfx {
+    fn assemble(
+        factory: ID2D1Factory1,
+        dwrite: IDWriteFactory5,
+        fonts: Option<IDWriteFontCollection1>,
+        ctx: ID2D1DeviceContext,
+        surface: Surface,
+        (width, height): (u32, u32),
+        scale: f32,
+    ) -> Result<Gfx> {
+        // SAFETY: 이 장치 컨텍스트에서 쓸 단색 브러시 하나
+        let solid = unsafe { ctx.CreateSolidColorBrush(&color(Color::hex(0, 1.0)), None)? };
+        Ok(Gfx {
+            factory,
+            dwrite,
+            fonts,
+            ctx,
+            surface,
+            width,
+            height,
+            scale,
+            images: RefCell::default(),
+            solid,
+            formats: RefCell::default(),
+            widths: RefCell::default(),
+        })
+    }
+
     /// `hwnd`는 `WS_EX_NOREDIRECTIONBITMAP`으로 만든 창이어야 한다.
     pub fn new(hwnd: HWND, width: u32, height: u32, scale: f32) -> Result<Gfx> {
         let (width, height) = (width.max(1), height.max(1));
@@ -227,8 +264,7 @@ impl Gfx {
             let (dwrite, fonts) = text_resources()?;
             let surface =
                 Surface::Window { swap, target_bitmap: None, _dcomp: dcomp, _target: target, _visual: visual };
-            let mut gfx =
-                Gfx { factory, dwrite, fonts, ctx, surface, width, height, scale, images: RefCell::default() };
+            let mut gfx = Gfx::assemble(factory, dwrite, fonts, ctx, surface, (width, height), scale)?;
             gfx.bind_target()?;
             Ok(gfx)
         }
@@ -298,8 +334,10 @@ impl Gfx {
         }
     }
 
+    /// 단색 브러시를 이 색으로 맞춰 돌려준다. Direct2D는 그리기 호출 때 색을 읽으므로 다음 호출 전에 바꿔도 된다.
     fn brush(&self, c: Color) -> Option<ID2D1SolidColorBrush> {
-        unsafe { self.ctx.CreateSolidColorBrush(&color(c), None) }.ok()
+        unsafe { self.solid.SetColor(&color(c)) };
+        Some(self.solid.clone())
     }
 
     pub fn fill_round_rect(&self, r: RectF, radius: f32, c: Color) {
@@ -447,6 +485,21 @@ impl Gfx {
     }
 
     fn text_format(&self, size: f32, weight: Weight, align: Align) -> Option<IDWriteTextFormat> {
+        self.format(size, weight, align, false)
+    }
+
+    /// 캐시된 글자 형식. `block`이면 줄바꿈하고 자르지 않는다, 아니면 한 줄에 넘치면 … 으로.
+    fn format(&self, size: f32, weight: Weight, align: Align, block: bool) -> Option<IDWriteTextFormat> {
+        let key = (size.to_bits(), weight, align, block);
+        if let Some(f) = self.formats.borrow().get(&key) {
+            return Some(f.clone());
+        }
+        let format = self.create_format(size, weight, align, block)?;
+        self.formats.borrow_mut().insert(key, format.clone());
+        Some(format)
+    }
+
+    fn create_format(&self, size: f32, weight: Weight, align: Align, block: bool) -> Option<IDWriteTextFormat> {
         let weight = DWRITE_FONT_WEIGHT(match weight {
             Weight::Regular => 400,
             Weight::SemiBold => 600,
@@ -471,16 +524,26 @@ impl Gfx {
                 Align::Center => DWRITE_TEXT_ALIGNMENT(2),
             });
             let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT(2)); // 세로 가운데
-            let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            let trimming =
-                DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
-            let sign = self.dwrite.CreateEllipsisTrimmingSign(&format).ok();
-            let _ = format.SetTrimming(&trimming, sign.as_ref());
+            if block {
+                let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+                let none =
+                    DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_NONE, delimiter: 0, delimiterCount: 0 };
+                let _ = format.SetTrimming(&none, None);
+            } else {
+                let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                let trimming = DWRITE_TRIMMING {
+                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                    delimiter: 0,
+                    delimiterCount: 0,
+                };
+                let sign = self.dwrite.CreateEllipsisTrimmingSign(&format).ok();
+                let _ = format.SetTrimming(&trimming, sign.as_ref());
+            }
             Some(format)
         }
     }
 
-    /// 사각형 안에 한 줄 텍스트 (세로 가운데, 넘치면 잘림)
+    /// 사각형 안에 한 줄 텍스트 (세로 가운데, 넘치면 … 으로)
     pub fn text(&self, text: &str, r: RectF, size: f32, weight: Weight, align: Align, c: Color) {
         let (Some(format), Some(brush)) = (self.text_format(size, weight, align), self.brush(c)) else { return };
         let wide: Vec<u16> = text.encode_utf16().collect();
@@ -496,17 +559,8 @@ impl Gfx {
         };
     }
 
-    /// 줄바꿈하는 글자 형식 (넘쳐도 자르지 않는다)
     fn block_format(&self, size: f32, weight: Weight, align: Align) -> Option<IDWriteTextFormat> {
-        let format = self.text_format(size, weight, align)?;
-        // SAFETY: 방금 만든 형식의 줄바꿈·자르기 설정만 바꾼다
-        unsafe {
-            let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-            let none =
-                DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_NONE, delimiter: 0, delimiterCount: 0 };
-            let _ = format.SetTrimming(&none, None);
-        }
-        Some(format)
+        self.format(size, weight, align, true)
     }
 
     /// 너비 `max_w` 안에서 줄바꿈한 글자 덩어리의 (가장 긴 줄 너비, 전체 높이)
@@ -544,6 +598,20 @@ impl Gfx {
 
     /// 한 줄 텍스트의 너비(DIP)
     pub fn measure(&self, text: &str, size: f32, weight: Weight) -> f32 {
+        let key = (text.to_string(), size.to_bits(), weight);
+        if let Some(w) = self.widths.borrow().get(&key) {
+            return *w;
+        }
+        let w = self.measure_uncached(text, size, weight);
+        let mut widths = self.widths.borrow_mut();
+        if widths.len() >= WIDTH_CACHE_MAX {
+            widths.clear();
+        }
+        widths.insert(key, w);
+        w
+    }
+
+    fn measure_uncached(&self, text: &str, size: f32, weight: Weight) -> f32 {
         let Some(format) = self.text_format(size, weight, Align::Leading) else { return 0.0 };
         let wide: Vec<u16> = text.encode_utf16().collect();
         // SAFETY: 측정용 레이아웃을 만들어 크기만 읽는다
@@ -588,7 +656,7 @@ mod offscreen {
                 let ctx: ID2D1DeviceContext = rt.cast()?;
                 let (dwrite, fonts) = text_resources()?;
                 let surface = Surface::Image { wic, bitmap };
-                Ok(Gfx { factory, dwrite, fonts, ctx, surface, width, height, scale, images: RefCell::default() })
+                Gfx::assemble(factory, dwrite, fonts, ctx, surface, (width, height), scale)
             }
         }
 

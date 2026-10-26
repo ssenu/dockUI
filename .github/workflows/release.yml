@@ -15,6 +15,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component clippy
@@ -51,6 +53,18 @@ jobs:
           if (-not (Test-Path "$dir/$setup")) { throw "설치 파일 이름이 규칙과 다릅니다" }
           $line = (Get-Content "$dir/SHA256SUMS.txt" -Raw).Trim()
           if ($line -notmatch "^[0-9a-f]{64}  $([regex]::Escape($setup))$") { throw "SHA256SUMS.txt 형식 오류: $line" }
+      - name: Release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # 이전 태그 이후 커밋 제목을 바뀐 점 목록으로 (앱의 업데이트 확인 창에 요약해 보인다)
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $prev = git describe --tags --abbrev=0 "$env:TAG^" 2>$null
+          $range = if ($LASTEXITCODE -eq 0 -and $prev) { "$prev..$env:TAG" } else { $env:TAG }
+          $lines = git log $range --no-merges --pretty=format:"- %s"
+          "## 바뀐 점`n`n" + ($lines -join "`n") | Set-Content release-notes.md -Encoding utf8NoBOM
+          Get-Content release-notes.md
+          $global:LASTEXITCODE = 0
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -58,4 +72,5 @@ jobs:
             dist/installer/YT-Launcher-Setup-${{ env.APP_VERSION }}.exe
             dist/installer/SHA256SUMS.txt
           fail_on_unmatched_files: true
+          body_path: release-notes.md
           generate_release_notes: true
