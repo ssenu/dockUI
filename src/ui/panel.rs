@@ -82,11 +82,6 @@ pub enum PanelCmd {
     Dropped(Vec<Dropped>),
     /// 독 수정 모드 켜기/끄기
     SetEditing(bool),
-    /// 독 위치(가장자리를 따라 0..1)와 아이콘 크기
-    SetDockPlacement {
-        offset: f32,
-        size: u32,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1057,14 +1052,6 @@ impl Panel {
             }
             PanelCmd::Dropped(items) => self.emit(UiEvent::Dropped(items)),
             PanelCmd::SetEditing(on) => self.set_editing(on && self.mode == Mode::Dock),
-            PanelCmd::SetDockPlacement { offset, size } => {
-                self.dock.offset = offset;
-                self.dock.size = size;
-                if self.mode == Mode::Dock {
-                    self.place_windows();
-                    self.render();
-                }
-            }
             PanelCmd::Close => {
                 drop::revoke(&[self.glass, self.content]);
                 let _ = unsafe { DestroyWindow(self.content) };

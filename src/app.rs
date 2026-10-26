@@ -64,10 +64,6 @@ const CMD_THEME: u32 = 40;
 const CMD_MODE_DOCK: u32 = 30;
 const CMD_MODE_PANEL: u32 = 31;
 const CMD_DOCK_EDIT: u32 = 36;
-const CMD_EDGE_BOTTOM: u32 = 32;
-const CMD_EDGE_TOP: u32 = 33;
-const CMD_EDGE_LEFT: u32 = 34;
-const CMD_EDGE_RIGHT: u32 = 35;
 const CMD_RESET_GEOMETRY: u32 = 21;
 const CMD_LOCK: u32 = 22;
 const CMD_AUTOSTART: u32 = 10;
@@ -241,6 +237,23 @@ fn update_tile(version: &str, downloading: bool, progress: Option<u8>) -> TileVi
         (false, _) => (format!("새 버전 v{version} 설치"), format!("v{version}")),
     };
     TileView { id: UPDATE_TILE_ID.to_string(), label, badge, kind: TileKind::Update, ..Default::default() }
+}
+
+/// 모드 부분 메뉴 (순수 함수): 독 모드 아래에는 독 수정 모드만, 패널 모드면 위치 초기화·잠금.
+/// 독 위치는 독 수정 모드에서 판을 끌어 바꾼다.
+fn mode_entries(dock: bool, editing: bool, locked: bool) -> Vec<MenuEntry> {
+    let mut entries = vec![
+        MenuEntry::checked(CMD_MODE_DOCK, "독 모드", dock),
+        MenuEntry::checked(CMD_DOCK_EDIT, "    독 수정 모드 (옮기기·크기·순서)", dock && editing),
+        MenuEntry::checked(CMD_MODE_PANEL, "패널 모드", !dock),
+    ];
+    if !dock {
+        entries.extend([
+            MenuEntry::item(CMD_RESET_GEOMETRY, "위치·크기 초기화"),
+            MenuEntry::checked(CMD_LOCK, "위치 잠금", locked),
+        ]);
+    }
+    entries
 }
 
 /// 끌어다 놓은 것 → 입력 (exe·바로가기는 앱, .url 파일과 주소는 웹, 그 밖의 파일·폴더는 파일 항목)
@@ -721,13 +734,6 @@ impl App {
         self.panel_send(PanelCmd::SetMode(mode, edge));
     }
 
-    /// 메뉴에서 독 가장자리를 고르면 그 가장자리 가운데로
-    fn set_edge(&mut self, edge: DockEdge) {
-        self.config.dock_offset = 0.5;
-        self.panel_send(PanelCmd::SetDockPlacement { offset: 0.5, size: self.config.dock_size });
-        self.set_mode(Mode::Dock, edge);
-    }
-
     fn set_theme(&mut self, theme: Theme) {
         self.config.theme = theme;
         self.save();
@@ -825,7 +831,6 @@ impl App {
 
     fn menu_entries(&self) -> Vec<MenuEntry> {
         let dock = self.config.mode == Mode::Dock;
-        let edge = self.config.dock_edge;
         let mut entries = vec![
             MenuEntry::label(format!("{APP_NAME}  {BYLINE}  v{CURRENT_VERSION}")),
             MenuEntry::Separator,
@@ -840,23 +845,8 @@ impl App {
                     .collect(),
             ),
             MenuEntry::Separator,
-            MenuEntry::checked(CMD_MODE_DOCK, "독 모드", dock),
-            MenuEntry::checked(CMD_DOCK_EDIT, "    독 수정 모드 (옮기기·크기·순서)", dock && self.dock_editing),
-            MenuEntry::checked(CMD_MODE_PANEL, "패널 모드", !dock),
         ];
-        if dock {
-            entries.extend([
-                MenuEntry::checked(CMD_EDGE_BOTTOM, "    독 위치: 아래", edge == DockEdge::Bottom),
-                MenuEntry::checked(CMD_EDGE_TOP, "    독 위치: 위", edge == DockEdge::Top),
-                MenuEntry::checked(CMD_EDGE_LEFT, "    독 위치: 왼쪽", edge == DockEdge::Left),
-                MenuEntry::checked(CMD_EDGE_RIGHT, "    독 위치: 오른쪽", edge == DockEdge::Right),
-            ]);
-        } else {
-            entries.extend([
-                MenuEntry::item(CMD_RESET_GEOMETRY, "위치·크기 초기화"),
-                MenuEntry::checked(CMD_LOCK, "위치 잠금", self.config.locked),
-            ]);
-        }
+        entries.extend(mode_entries(dock, self.dock_editing, self.config.locked));
         entries.extend([
             MenuEntry::Separator,
             MenuEntry::checked(CMD_AUTOSTART, "윈도우 시작 시 실행", self.autostart.is_enabled()),
@@ -894,10 +884,6 @@ impl App {
                 }
                 self.panel_send(PanelCmd::SetEditing(on));
             }
-            CMD_EDGE_BOTTOM => self.set_edge(DockEdge::Bottom),
-            CMD_EDGE_TOP => self.set_edge(DockEdge::Top),
-            CMD_EDGE_LEFT => self.set_edge(DockEdge::Left),
-            CMD_EDGE_RIGHT => self.set_edge(DockEdge::Right),
             CMD_RESET_GEOMETRY => self.panel_send(PanelCmd::ResetGeometry),
             CMD_LOCK => {
                 self.config.locked = !self.config.locked;
@@ -1167,6 +1153,21 @@ mod tests {
         assert!(drop_message(0, 1, 1).contains("이미 있는 1개") && drop_message(0, 1, 1).contains("읽을 수 없는 1개"));
         let path = |p: &str| Item::Path { id: new_id(), path: p.into(), name: String::new() };
         assert!(same_target(&path("C:/A/b.txt"), &path("c:/a/B.TXT")));
+    }
+
+    #[test]
+    fn dock_menu_has_edit_mode_but_no_edge_items() {
+        let texts: Vec<String> = mode_entries(true, false, false)
+            .into_iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("독 수정 모드")));
+        assert!(!texts.iter().any(|t| t.contains("독 위치")), "{texts:?}");
+        let panel = mode_entries(false, false, true);
+        assert!(panel.iter().any(|e| matches!(e, MenuEntry::Item { text, .. } if text.contains("위치 잠금"))));
     }
 
     #[test]
