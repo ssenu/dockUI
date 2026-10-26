@@ -6,8 +6,6 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::{HSTRING, PCWSTR};
 
-// HKEY_LOCAL_MACHINE은 크롬 경로 탐색(Task 6)에서 쓰기 시작한다.
-#[allow(unused_imports)]
 pub use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
 fn wide(s: &str) -> Vec<u16> {

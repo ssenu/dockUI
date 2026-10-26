@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 mod autostart;
+mod chrome;
 mod config;
 mod items;
 mod updater;
