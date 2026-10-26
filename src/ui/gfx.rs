@@ -687,6 +687,17 @@ mod offscreen {
             }
         }
 
+        /// 이미지 대상의 픽셀 (BGRA, 위에서 아래로) — 테스트에서 그림을 비교할 때
+        #[cfg(test)]
+        pub fn pixels(&self) -> Vec<u8> {
+            let Surface::Image { bitmap, .. } = &self.surface else { return Vec::new() };
+            let stride = self.width * 4;
+            let mut buf = vec![0u8; (stride * self.height) as usize];
+            // SAFETY: 비트맵 크기만큼의 버퍼로 복사한다
+            let _ = unsafe { bitmap.CopyPixels(std::ptr::null(), stride, &mut buf) };
+            buf
+        }
+
         /// 이미지 대상이면 PNG로 저장한다.
         #[cfg(test)]
         pub fn save_png(&self, path: &std::path::Path) -> Result<()> {

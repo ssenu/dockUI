@@ -242,11 +242,13 @@ fn tooltip_size(g: &Gfx, text: &str, room: f32) -> (f32, f32) {
     ((w + 20.0).ceil().clamp(40.0, max_w), (h + 10.0).ceil().max(26.0))
 }
 
-/// 사각형을 실제 화면 픽셀 경계에 맞춘다 (`scale` = DIP → px 배율)
+/// 사각형을 실제 화면 픽셀 경계에 맞춘다 (`scale` = DIP → px 배율).
+/// 위치는 반올림, 크기는 올림으로 따로 맞춰 위치가 움직여도 크기가 1px씩 흔들리지 않게 한다
+/// (크기가 흔들리면 가운데 정렬 글자가 흔들리고 줄바꿈이 바뀐다).
 pub fn snap(r: RectF, scale: f32) -> RectF {
-    let f = |v: f32| (v * scale).round() / scale;
-    let (x, y) = (f(r.x), f(r.y));
-    RectF::new(x, y, f(r.right()) - x, f(r.bottom()) - y)
+    let pos = |v: f32| (v * scale).round() / scale;
+    let size = |v: f32| (v * scale - 1e-3).ceil() / scale;
+    RectF::new(pos(r.x), pos(r.y), size(r.w), size(r.h))
 }
 
 /// 말풍선 상자. 어두운 배경(투명 테마)에서도 경계가 보이게 옅은 테두리를 두른다.
@@ -257,7 +259,9 @@ fn draw_tooltip_box(g: &Gfx, text: &str, r: RectF, alpha: f32, scale: f32) {
     g.fill_round_rect(r, 8.0, TOOLTIP_BG.with_alpha(TOOLTIP_BG.a * alpha));
     let edge = RectF::new(r.x + half, r.y + half, r.w - 2.0 * half, r.h - 2.0 * half);
     g.stroke_round_rect(edge, 8.0 - half, Color::hex(0xFFFFFF, 0.14 * alpha), 1.0 / scale);
-    let inner = RectF::new(r.x + 10.0, r.y, r.w - 20.0, r.h);
+    // 글자 영역도 픽셀 경계에서 시작하고 너비가 고정이어야 글자 간격·줄바꿈이 프레임마다 같다
+    let pad = (10.0 * scale).round() / scale;
+    let inner = RectF::new(r.x + pad, r.y, r.w - 2.0 * pad, r.h);
     g.text_block(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT.with_alpha(alpha));
 }
 
@@ -442,9 +446,13 @@ pub fn edit_hint_rect(g: &Gfx, bar: RectF, edge: DockEdge, bounds: (f32, f32)) -
     RectF::new(x, y, w, h)
 }
 
-/// 만든 사람 표시: 판 끝 글자 칸에 `by` / `ssenu` 두 줄, 연한 글씨
-fn draw_credit(g: &Gfx, r: RectF, p: &Palette) {
+/// 만든 사람 표시: 판 끝 글자 칸에 연한 글씨. 세로 독은 한 줄, 가로 독은 `by` / `ssenu` 두 줄
+fn draw_credit(g: &Gfx, r: RectF, p: &Palette, vertical: bool) {
     let c = p.subtext.with_alpha(0.55);
+    if vertical {
+        g.text("by ssenu", r, 9.0, Weight::SemiBold, Align::Center, c);
+        return;
+    }
     let line = 11.0;
     let top = r.center().y - line;
     g.text("by", RectF::new(r.x, top, r.w, line), 9.0, Weight::SemiBold, Align::Center, c);
@@ -516,7 +524,7 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
         let inner = RectF::new(bar.x + 1.0, bar.y + 1.0, bar.w - 2.0, bar.h - 2.0);
         g.stroke_round_rect(inner, WINDOW_RADIUS - 1.0, ACCENT, 1.6);
     }
-    draw_credit(g, credit_rect(s.layout, s.mag, s.center), p);
+    draw_credit(g, credit_rect(s.layout, s.mag, s.center), p, dock_layout::is_vertical(s.layout.edge));
     if let Some(along) = s.mag.separator {
         let inset = dock_layout::PAD + 6.0;
         let (a, b) = if dock_layout::is_vertical(s.layout.edge) {
@@ -574,6 +582,49 @@ mod tests {
             assert!(((v * 1.5) - (v * 1.5).round()).abs() < 1e-4, "{v}");
         }
         assert_eq!(snap(RectF::new(1.0, 2.0, 3.0, 4.0), 1.0), RectF::new(1.0, 2.0, 3.0, 4.0));
+        // 위치가 조금씩 움직여도 크기는 그대로 (줄바꿈·가운데 정렬이 흔들리지 않게), 줄지도 않는다
+        let sizes: Vec<(f32, f32)> = (0..20)
+            .map(|i| snap(RectF::new(10.0 + i as f32 * 0.137, 5.3, 80.4, 26.0), 1.25))
+            .map(|r| (r.w, r.h))
+            .collect();
+        assert!(sizes.windows(2).all(|w| w[0] == w[1]), "{sizes:?}");
+        assert!(sizes[0].0 >= 80.4 && sizes[0].1 >= 26.0);
+    }
+
+    /// 말풍선이 소수점 위치로 조금씩 움직여도 (확대 애니메이션 중) 안쪽 그림이 픽셀 단위로 똑같아야 글자가 흔들리지 않는다
+    #[test]
+    fn tooltip_pixels_do_not_shift_with_subpixel_moves() {
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
+        };
+        let scale = 1.25;
+        let (w, h) = (400u32, 120u32);
+        let gfx = Gfx::offscreen(w, h, scale).unwrap();
+        let text = "아침 뉴스 라이브 - 오늘의 주요 소식 모아 보기";
+        let mut crops = Vec::new();
+        for i in 0..8 {
+            let dx = i as f32 * 0.13;
+            let r = RectF::new(20.0 + dx, 30.0 + dx * 0.5, 240.0, 26.0);
+            gfx.begin();
+            draw_tooltip_box(&gfx, text, r, 1.0, scale);
+            gfx.end().unwrap();
+            let px = gfx.pixels();
+            // 맞춘 말풍선 왼쪽 위 기준으로 잘라 비교
+            let s = snap(r, scale);
+            let (ox, oy) = ((s.x * scale).round() as usize, (s.y * scale).round() as usize);
+            let (cw, ch) = ((s.w * scale) as usize, (s.h * scale) as usize);
+            let mut crop = Vec::with_capacity(cw * ch * 4);
+            for y in oy..oy + ch {
+                let row = (y * w as usize + ox) * 4;
+                crop.extend_from_slice(&px[row..row + cw * 4]);
+            }
+            crops.push(crop);
+        }
+        // 둥근 모서리 경계의 부동소수 오차(밝기 1~2단계)만 허용한다. 글자가 0.5px만 밀려도 수십 단계가 바뀐다.
+        for c in &crops[1..] {
+            let delta = c.iter().zip(&crops[0]).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap_or(0);
+            assert!(delta <= 3, "말풍선 안 픽셀이 위치에 따라 달라짐 (최대 차이 {delta})");
+        }
     }
 
     #[test]
