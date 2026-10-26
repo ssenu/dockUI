@@ -801,6 +801,7 @@ dependencies = [
  "sha2",
  "ureq",
  "windows",
+ "windows-numerics",
 ]
 
 [[package]]
