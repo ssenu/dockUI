@@ -19,7 +19,9 @@ use crate::win::menu::{MenuEntry, show_popup};
 use crate::win::msg_window::{Handler, WindowSpec, create_window};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToClient};
+use windows::Win32::Graphics::Gdi::{
+    BLACK_BRUSH, BeginPaint, EndPaint, FillRect, GetStockObject, HBRUSH, PAINTSTRUCT, ScreenToClient,
+};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -596,9 +598,11 @@ impl Handler for Panel {
             },
             WM_ERASEBKGND => {}
             WM_PAINT => {
+                // 유리 창은 검게 칠해 둔다: 흐림 효과는 검은(빈) 부분에 비친다
                 let mut ps = PAINTSTRUCT::default();
                 unsafe {
-                    BeginPaint(hwnd, &mut ps);
+                    let dc = BeginPaint(hwnd, &mut ps);
+                    FillRect(dc, &ps.rcPaint, HBRUSH(GetStockObject(BLACK_BRUSH).0));
                     let _ = EndPaint(hwnd, &ps);
                 }
                 self.render();
