@@ -6,3 +6,4 @@ dist/
 installer/Output/
 .pytest_cache/
 *.spec
+/target/
