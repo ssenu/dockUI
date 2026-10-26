@@ -4,5 +4,6 @@ pub mod anim;
 pub mod dialogs;
 pub mod gfx;
 pub mod layout;
+pub mod panel;
 pub mod scene;
 pub mod theme;

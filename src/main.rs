@@ -1,7 +1,5 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 //! YT Launcher 진입점.
-// 크롬 실행·항목 모델은 2단계(화면)에서 연결된다. 그때 이 줄을 지운다.
-#![allow(dead_code)]
 
 mod app;
 mod autostart;
@@ -27,6 +25,11 @@ fn main() {
         notify_existing();
         return;
     }
+
+    // 셸·COM을 쓰는 기능(ShellExecute, 4단계의 앱 목록)을 위해 UI 스레드를 STA로 초기화한다
+    let _ = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
+    };
 
     let app = app::App::new(config::Storage::new(&data_dir));
     if let Err(e) = win::msg_window::create(MESSAGE_CLASS, Box::new(app)) {

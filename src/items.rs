@@ -62,6 +62,7 @@ impl Item {
         Ok(Item::Youtube { id: new_id(), query: query.to_string(), name: name.trim().to_string() })
     }
 
+    #[allow(dead_code)] // 4단계(웹 주소 항목 추가)에서 사용
     pub fn web(url: &str, name: &str) -> Result<Item, ItemError> {
         Ok(Item::Web { id: new_id(), url: normalize_url(url)?, name: name.trim().to_string() })
     }
