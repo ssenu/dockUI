@@ -10,7 +10,7 @@
 use crate::config::{DockEdge, Mode, Rect, Theme};
 use crate::logging;
 use crate::ui::anim::{Anim, Tween};
-use crate::ui::dock_layout::{self, DockLayout, Magnified};
+use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
 use crate::ui::drop::{self, Dropped};
 use crate::ui::gfx::Gfx;
 use crate::ui::layout::{
@@ -24,30 +24,37 @@ use crate::win::dwm;
 use crate::win::menu::{MenuEntry, show_popup};
 use crate::win::msg_window::{Handler, WindowSpec, create_window};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BLACK_BRUSH, BeginPaint, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, FillRect, GetStockObject, HBRUSH,
     HGDIOBJ, HRGN, PAINTSTRUCT, RGN_OR, ScreenToClient, SetWindowRgn,
 };
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyWindow, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-    HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HTTRANSPARENT, KillTimer, MA_NOACTIVATE,
-    MINMAXINFO, PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer, SetWindowPos, ShowWindow,
-    WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
-    WM_WINDOWPOSCHANGED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+    DestroyWindow, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, HTBOTTOM, HTBOTTOMLEFT,
+    HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HTTRANSPARENT, IDC_SIZEALL,
+    KillTimer, LoadCursorW, MA_NOACTIVATE, MINMAXINFO, PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
+    SetCursor, SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
+    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 /// 앱 → 화면 명령이 채널에 들어왔음을 알리는 메시지
 pub const WM_APP_PANEL: u32 = WM_APP + 10;
 const TIMER_ANIM: usize = 1;
 const TIMER_SAVE_GEOMETRY: usize = 2;
-const FRAME_MS: u32 = 16;
+/// 애니메이션 타이머 간격. 실제 프레임은 화면 합성 주기(DwmFlush)에 맞춘다.
+const FRAME_MS: u32 = 10;
+/// 프레임 사이 시간이 이보다 길면(창이 잠깐 멈춤 등) 이만큼만 진행한 것으로 본다
+const MAX_FRAME_DT: f32 = 50.0;
 const SAVE_DELAY_MS: u32 = 500;
 const DRAG_THRESHOLD: f32 = 6.0;
 const PICKER_MS: f32 = 160.0;
@@ -74,6 +81,13 @@ pub enum PanelCmd {
     DropHover(bool),
     /// 끌어다 놓은 파일·주소 (앱에 그대로 넘긴다)
     Dropped(Vec<Dropped>),
+    /// 독 수정 모드 켜기/끄기
+    SetEditing(bool),
+    /// 독 위치(가장자리를 따라 0..1)와 아이콘 크기
+    SetDockPlacement {
+        offset: f32,
+        size: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +103,14 @@ pub enum UiEvent {
     MenuRequested,
     /// 독·패널에 파일·주소를 끌어다 놓음
     Dropped(Vec<Dropped>),
+    /// 독 수정 모드에서 위치·가장자리·크기가 바뀜 (저장)
+    DockChanged {
+        edge: DockEdge,
+        offset: f32,
+        size: u32,
+    },
+    /// 독 수정 모드가 켜지거나 꺼짐 (트레이 메뉴 체크 표시)
+    EditingChanged(bool),
 }
 
 /// 처음 화면을 열 때 필요한 값
@@ -100,6 +122,10 @@ pub struct OpenSpec {
     pub theme: Theme,
     pub locked: bool,
     pub tiles: Vec<TileView>,
+    /// 독 위치 (가장자리를 따라 0..1, 0.5가 가운데)
+    pub dock_offset: f32,
+    /// 독 아이콘 크기 (DIP)
+    pub dock_size: u32,
 }
 
 /// 앱이 화면에 명령을 보내는 손잡이
@@ -152,6 +178,14 @@ struct Dock {
     center_px: (i32, i32),
     /// 콘텐츠 창 사각형 (화면 px)
     content_px: PxRect,
+    /// 가장자리를 따라 놓인 위치 0..1
+    offset: f32,
+    /// 아이콘 크기 (DIP, 48이 기본)
+    size: u32,
+    /// 수정 모드: 판 끌어 옮기기, 크기 단추, 아이콘 순서 바꾸기
+    editing: bool,
+    /// 판을 끌어 옮기는 중: 누른 곳과 판 중심의 along 거리 (px)
+    moving: Option<i32>,
 }
 
 pub struct Panel {
@@ -180,6 +214,11 @@ pub struct Panel {
     picker_hover: Option<usize>,
     locked: bool,
     animating: bool,
+    /// 지난 애니메이션 프레임 시각 (경과 시간으로 진행)
+    last_frame: Instant,
+    /// 마지막으로 놓은 유리 창·창 영역 (같으면 다시 하지 않는다)
+    last_glass: Option<PxRect>,
+    last_region: Vec<PxRect>,
     rx: Receiver<PanelCmd>,
     /// 끌어 놓기 대상이 화면에 명령을 보낼 채널
     tx: Sender<PanelCmd>,
@@ -243,7 +282,7 @@ impl Panel {
         let (tx, rx) = channel();
         let glass_spec = WindowSpec {
             class: GLASS_CLASS,
-            title: "YT Launcher",
+            title: crate::app::APP_NAME,
             ex_style: WS_EX_TOOLWINDOW,
             style: WS_POPUP,
             rect: spec.panel_rect,
@@ -259,12 +298,16 @@ impl Panel {
             mode: spec.mode,
             layout: PanelLayout::compute(spec.panel_rect.2 as f32, spec.panel_rect.3 as f32, n),
             dock: Dock {
-                layout: DockLayout::compute(spec.edge, n),
+                layout: DockLayout::compute(spec.edge, n, false),
                 edge: spec.edge,
                 pointer: None,
                 amount: Anim::at(0.0),
                 center_px: (0, 0),
                 content_px: spec.panel_rect,
+                offset: spec.dock_offset,
+                size: spec.dock_size,
+                editing: false,
+                moving: None,
             },
             panel_rect: spec.panel_rect,
             positioning: false,
@@ -282,6 +325,9 @@ impl Panel {
             picker_hover: None,
             locked: spec.locked,
             animating: false,
+            last_frame: Instant::now(),
+            last_glass: None,
+            last_region: Vec::new(),
             rx,
             tx: tx.clone(),
             drop_hover: false,
@@ -336,9 +382,23 @@ impl Panel {
         theme::blend(&self.fade_from, &theme::palette(self.theme), self.fade.progress())
     }
 
+    /// 독 그리기 배율: DPI 배율 × 아이콘 크기 배율 (독은 48px 기준으로 배치하고 통째로 키운다)
+    fn dock_scale(&self) -> f32 {
+        self.scale * dock_layout::zoom_for(self.dock.size)
+    }
+
+    /// 지금 모드의 그리기 배율 (DIP → px)
+    fn draw_scale(&self) -> f32 {
+        match self.mode {
+            Mode::Panel => self.scale,
+            Mode::Dock => self.dock_scale(),
+        }
+    }
+
     fn resize_gfx(&mut self, w: i32, h: i32) {
+        let scale = self.draw_scale();
         if let Some(gfx) = &mut self.gfx
-            && let Err(e) = gfx.resize(w as u32, h as u32, self.scale)
+            && let Err(e) = gfx.resize(w as u32, h as u32, scale)
         {
             logging::error(&format!("그리기 크기 변경 실패: {e}"));
         }
@@ -346,6 +406,9 @@ impl Panel {
 
     /// 지금 모드에 맞게 두 창의 위치·크기를 정한다.
     fn place_windows(&mut self) {
+        // 창을 새로 놓으므로 기억해 둔 독 유리 창·영역은 무효
+        self.last_glass = None;
+        self.last_region.clear();
         self.positioning = true;
         match self.mode {
             Mode::Panel => {
@@ -370,20 +433,21 @@ impl Panel {
     }
 
     fn place_dock(&mut self) {
-        let s = self.scale;
+        let s = self.dock_scale();
         let d = &mut self.dock;
-        d.layout = DockLayout::compute(d.edge, self.tiles.len());
+        d.layout = DockLayout::compute(d.edge, self.tiles.len(), d.editing);
         let work = desktop::primary_work_area();
-        let thick = (dock_layout::THICK * s).round() as i32;
-        let margin = (dock_layout::MARGIN * s).round() as i32;
-        let rest = dock_layout::bar_rect(work, d.edge, (d.layout.length * s).round() as i32, thick, margin);
-        d.center_px = (rest.0 + rest.2 / 2, rest.1 + rest.3 / 2);
-        let widest = dock_layout::bar_rect(work, d.edge, (d.layout.max_length() * s).round() as i32, thick, margin);
+        let px = |v: f32| (v * s).round() as i32;
+        let thick = px(dock_layout::THICK);
+        let widest = px(d.layout.max_length());
+        d.center_px =
+            dock_layout::bar_center(work, d.edge, widest, thick, px(dock_layout::edge_margin(d.edge)), d.offset);
         d.content_px = dock_layout::content_rect(
-            widest,
+            dock_layout::rect_around(d.center_px, d.edge, widest, thick),
             d.edge,
-            (d.layout.headroom() * s).round() as i32,
-            (d.layout.side_room() * s).round() as i32,
+            px(d.layout.headroom()),
+            px(d.layout.side_room()),
+            px(dock_layout::CREDIT_H),
         );
         let content = d.content_px;
         move_window(self.content, content);
@@ -398,14 +462,15 @@ impl Panel {
     /// 판 중심 (콘텐츠 창 기준 DIP)
     fn dock_center(&self) -> (f32, f32) {
         let d = &self.dock;
-        ((d.center_px.0 - d.content_px.0) as f32 / self.scale, (d.center_px.1 - d.content_px.1) as f32 / self.scale)
+        let s = self.dock_scale();
+        ((d.center_px.0 - d.content_px.0) as f32 / s, (d.center_px.1 - d.content_px.1) as f32 / s)
     }
 
     /// 확대된 길이에 맞춰 유리 창(판)을 옮기고, 콘텐츠 창 영역을 지금 그려지는 부분으로 줄인다.
     fn update_dock_glass(&mut self) {
         let m = self.dock_mag();
         let bar = self.dock.layout.bar_rect(&m, self.dock_center());
-        let s = self.scale;
+        let s = self.dock_scale();
         let (cx, cy, _, _) = self.dock.content_px;
         let px = |r: RectF| {
             let x = (r.x * s).round() as i32;
@@ -413,9 +478,13 @@ impl Panel {
             (x, y, (r.right() * s).round() as i32 - x, (r.bottom() * s).round() as i32 - y)
         };
         let local = px(bar);
-        self.positioning = true;
-        move_window(self.glass, (cx + local.0, cy + local.1, local.2, local.3));
-        self.positioning = false;
+        let glass = (cx + local.0, cy + local.1, local.2, local.3);
+        if self.last_glass != Some(glass) {
+            self.last_glass = Some(glass);
+            self.positioning = true;
+            move_window(self.glass, glass);
+            self.positioning = false;
+        }
 
         // 창 영역: 판 + 커진 아이콘이 나가는 쪽 + 말풍선 + 열린 선택기
         let grow = m.scales.iter().fold(0.0f32, |a, &b| a.max(b - 1.0)) * dock_layout::ICON;
@@ -431,13 +500,25 @@ impl Panel {
         if let Some(r) = self.dock_tooltip_rect(&m) {
             rects.push(px(RectF::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0)));
         }
-        if let Some(region) = region_from(&rects) {
+        // 판 아래 "by ssenu", 수정 모드 안내
+        if let Some(gfx) = &self.gfx {
+            rects.push(px(scene::credit_rect(gfx, bar)));
+            if self.dock.editing {
+                let r = scene::edit_hint_rect(gfx, bar, self.dock.edge, self.dock_size());
+                rects.push(px(RectF::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0)));
+            }
+        }
+        if rects != self.last_region
+            && let Some(region) = region_from(&rects)
+        {
+            self.last_region = rects;
             let _ = unsafe { SetWindowRgn(self.content, Some(region), true) };
         }
     }
 
     fn dock_size(&self) -> (f32, f32) {
-        (self.dock.content_px.2 as f32 / self.scale, self.dock.content_px.3 as f32 / self.scale)
+        let s = self.dock_scale();
+        (self.dock.content_px.2 as f32 / s, self.dock.content_px.3 as f32 / s)
     }
 
     fn dock_tooltip_rect(&self, m: &Magnified) -> Option<RectF> {
@@ -448,16 +529,70 @@ impl Panel {
         Some(scene::dock_tooltip_rect(gfx, text, icon, layout.edge, self.dock_size()))
     }
 
-    fn dock_tooltip(&self) -> Option<usize> {
-        if self.drag.is_some() || self.dock.amount.value < 0.5 {
-            return None;
-        }
-        let tiles = self.tiles.len();
+    /// 마우스가 올라간 독 칸 번호
+    fn dock_hovered(&self) -> Option<usize> {
+        let slots = self.dock.layout.slots();
+        let find = |s: Slot| slots.iter().position(|x| *x == s);
         match self.hover_hit {
-            Hit::Tile(i) => Some(i),
-            Hit::Add => Some(tiles),
+            Hit::Tile(i) => find(Slot::Tile(i)),
+            Hit::Add => find(Slot::Add),
+            Hit::Shrink => find(Slot::Shrink),
+            Hit::Grow => find(Slot::Grow),
+            Hit::Done => find(Slot::Done),
             _ => None,
         }
+    }
+
+    fn dock_tooltip(&self) -> Option<usize> {
+        if self.drag.is_some() || self.dock.moving.is_some() {
+            return None;
+        }
+        // 수정 모드는 확대가 없으므로 수정 단추에만 말풍선
+        if self.dock.editing {
+            return self.dock_hovered().filter(|_| matches!(self.hover_hit, Hit::Shrink | Hit::Grow | Hit::Done));
+        }
+        if self.dock.amount.value < 0.5 {
+            return None;
+        }
+        self.dock_hovered()
+    }
+
+    /// 판을 끌어 옮기는 중: 커서에서 가장 가까운 가장자리로 붙이고 그 가장자리를 따라 옮긴다.
+    fn move_dock(&mut self, grab: i32) {
+        let mut pt = POINT::default();
+        let _ = unsafe { GetCursorPos(&mut pt) };
+        let work = desktop::primary_work_area();
+        let edge = dock_layout::nearest_edge(work, (pt.x, pt.y));
+        let grab = if edge == self.dock.edge { grab } else { 0 };
+        self.dock.edge = edge;
+        self.dock.moving = Some(grab);
+        let along = if dock_layout::is_vertical(edge) { pt.y } else { pt.x } - grab;
+        let layout = DockLayout::compute(edge, self.tiles.len(), self.dock.editing);
+        let widest = (layout.max_length() * self.dock_scale()).round() as i32;
+        self.dock.offset = dock_layout::offset_for(work, edge, widest, along);
+        self.place_windows();
+        self.render();
+    }
+
+    fn emit_dock_changed(&self) {
+        let d = &self.dock;
+        self.emit(UiEvent::DockChanged { edge: d.edge, offset: d.offset, size: d.size });
+    }
+
+    fn set_editing(&mut self, on: bool) {
+        if self.dock.editing == on {
+            return;
+        }
+        self.dock.editing = on;
+        self.dock.pointer = None;
+        self.dock.amount = Anim::at(0.0);
+        self.dock.moving = None;
+        self.hover_hit = Hit::Empty;
+        if self.mode == Mode::Dock {
+            self.place_windows();
+        }
+        self.render();
+        self.emit(UiEvent::EditingChanged(on));
     }
 
     /// 한 프레임 그리기. 그래픽 장치를 잃었으면(절전 복귀, 드라이버 재시작 등) 장치를 다시 만들고 한 번 더 그린다.
@@ -474,7 +609,7 @@ impl Panel {
     fn recreate_gfx(&mut self) {
         self.gfx = None;
         let (_, _, w, h) = screen_rect(self.content);
-        match Gfx::new(self.content, w as u32, h as u32, self.scale) {
+        match Gfx::new(self.content, w as u32, h as u32, self.draw_scale()) {
             Ok(gfx) => self.gfx = Some(gfx),
             Err(e) => logging::error(&format!("그리기 장치를 다시 만들지 못했습니다: {e}")),
         }
@@ -530,6 +665,7 @@ impl Panel {
                     tooltip: self.dock_tooltip(),
                     drag: self.drag,
                     drop_hover: self.drop_hover,
+                    hovered: self.dock_hovered(),
                 };
                 scene::draw_dock(gfx, &state);
             }
@@ -540,30 +676,51 @@ impl Panel {
     fn start_animation(&mut self) {
         if !self.animating {
             self.animating = true;
-            unsafe { SetTimer(Some(self.glass), TIMER_ANIM, FRAME_MS, None) };
+            self.last_frame = Instant::now();
+            // 애니메이션 동안만 타이머 해상도를 1ms로 (기본 15.6ms면 프레임 간격이 들쭉날쭉하다)
+            unsafe {
+                timeBeginPeriod(1);
+                SetTimer(Some(self.glass), TIMER_ANIM, FRAME_MS, None);
+            }
+        }
+    }
+
+    fn stop_animation(&mut self) {
+        if self.animating {
+            self.animating = false;
+            unsafe {
+                let _ = KillTimer(Some(self.glass), TIMER_ANIM);
+                timeEndPeriod(1);
+            }
         }
     }
 
     fn tick(&mut self) {
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32() * 1000.0;
+        self.last_frame = now;
+        let dt = dt.clamp(1.0, MAX_FRAME_DT);
         let mut moving = false;
         for anim in &mut self.hover {
-            moving |= anim.step();
+            moving |= anim.step(dt);
         }
-        moving |= self.fade.advance(FRAME_MS as f32);
+        moving |= self.fade.advance(dt);
         if self.picker_open {
-            moving |= self.picker.advance(FRAME_MS as f32);
+            moving |= self.picker.advance(dt);
         }
         if self.mode == Mode::Dock {
-            moving |= self.dock.amount.step();
+            moving |= self.dock.amount.step(dt);
             if self.dock.amount.value == 0.0 && self.dock.amount.target == 0.0 {
                 self.dock.pointer = None;
             }
             self.update_dock_glass();
         }
         self.render();
-        if !moving {
-            self.animating = false;
-            let _ = unsafe { KillTimer(Some(self.glass), TIMER_ANIM) };
+        if moving {
+            // 다음 화면 합성까지 기다려 프레임을 주사율에 맞춘다 (타이머는 우선순위가 낮아 그 사이 입력이 먼저 처리된다)
+            let _ = unsafe { DwmFlush() };
+        } else {
+            self.stop_animation();
         }
     }
 
@@ -574,7 +731,8 @@ impl Panel {
             Mode::Dock => {
                 let (gx, gy, _, _) = screen_rect(self.glass);
                 let (cx, cy, _, _) = self.dock.content_px;
-                Pt { x: (gx + x - cx) as f32 / self.scale, y: (gy + y - cy) as f32 / self.scale }
+                let s = self.dock_scale();
+                Pt { x: (gx + x - cx) as f32 / s, y: (gy + y - cy) as f32 / s }
             }
         }
     }
@@ -672,8 +830,15 @@ impl Panel {
             };
             self.tracking_leave = unsafe { TrackMouseEvent(&mut tme) }.is_ok();
         }
+        if let Some(grab) = self.dock.moving {
+            self.move_dock(grab);
+            return;
+        }
+        // 독은 수정 모드에서만 아이콘을 끌어 순서를 바꾼다 (패널은 늘)
+        let can_reorder = self.mode == Mode::Panel || self.dock.editing;
         if let Some(press) = &self.press
             && let Hit::Tile(i) = press.hit
+            && can_reorder
             && self.tiles[i].kind != TileKind::Update
             && self.drag.is_none()
             && ((p.x - press.at.x).powi(2) + (p.y - press.at.y).powi(2)).sqrt() > DRAG_THRESHOLD
@@ -690,13 +855,21 @@ impl Panel {
             self.picker_hover = swatch;
             self.render();
         }
-        if self.mode == Mode::Dock {
+        if self.mode == Mode::Dock && !self.dock.editing {
             let m = self.dock_mag();
             self.dock.pointer = Some(self.dock_axes(p, &m).0);
             self.dock.amount.set(1.0);
             self.start_animation();
         }
-        self.set_hover(self.hit(p));
+        let hit = self.hit(p);
+        if self.dock.editing && hit != self.hover_hit {
+            // 수정 단추 강조·말풍선은 애니메이션 없이 바로 다시 그린다
+            self.hover_hit = hit;
+            self.update_dock_glass();
+            self.render();
+            return;
+        }
+        self.set_hover(hit);
     }
 
     fn on_mouse_leave(&mut self) {
@@ -714,6 +887,11 @@ impl Panel {
     fn on_button_up(&mut self, p: Pt) {
         let _ = unsafe { ReleaseCapture() };
         let press = self.press.take();
+        if self.dock.moving.take().is_some() {
+            self.emit_dock_changed();
+            self.render();
+            return;
+        }
         if let Some((from, pos)) = self.drag.take() {
             let to = self.drop_index(pos);
             if from != to {
@@ -745,8 +923,20 @@ impl Panel {
             return;
         }
         match hit {
+            // 수정 모드에서는 아이콘을 눌러도 열지 않는다
+            Hit::Tile(_) if self.mode == Mode::Dock && self.dock.editing => {}
             Hit::Tile(i) => self.emit(UiEvent::TileClicked(self.tiles[i].id.clone())),
             Hit::Add => self.emit(UiEvent::AddRequested),
+            Hit::Shrink | Hit::Grow => {
+                let dir = if hit == Hit::Grow { 1 } else { -1 };
+                let size = dock_layout::step_size(self.dock.size, dir);
+                if size != self.dock.size {
+                    self.dock.size = size;
+                    self.place_windows();
+                    self.emit_dock_changed();
+                }
+            }
+            Hit::Done => self.set_editing(false),
             Hit::Menu => self.emit(UiEvent::MenuRequested),
             Hit::Palette => {
                 self.picker_open = true;
@@ -832,6 +1022,10 @@ impl Panel {
             }
             PanelCmd::SetLocked(locked) => self.locked = locked,
             PanelCmd::SetMode(mode, edge) => {
+                if self.dock.editing && mode == Mode::Panel {
+                    self.dock.editing = false;
+                    self.emit(UiEvent::EditingChanged(false));
+                }
                 self.mode = mode;
                 self.dock.edge = edge;
                 self.dock.pointer = None;
@@ -858,6 +1052,15 @@ impl Panel {
                 }
             }
             PanelCmd::Dropped(items) => self.emit(UiEvent::Dropped(items)),
+            PanelCmd::SetEditing(on) => self.set_editing(on && self.mode == Mode::Dock),
+            PanelCmd::SetDockPlacement { offset, size } => {
+                self.dock.offset = offset;
+                self.dock.size = size;
+                if self.mode == Mode::Dock {
+                    self.place_windows();
+                    self.render();
+                }
+            }
             PanelCmd::Close => {
                 drop::revoke(&[self.glass, self.content]);
                 let _ = unsafe { DestroyWindow(self.content) };
@@ -890,7 +1093,16 @@ impl Handler for Panel {
             WM_LBUTTONDOWN => {
                 let (x, y) = lparam_point(lparam);
                 let at = self.local_point(x, y);
-                self.press = Some(Press { hit: self.hit(at), at });
+                let hit = self.hit(at);
+                self.press = Some(Press { hit, at });
+                // 수정 모드에서 판의 빈 곳을 누르면 판 옮기기
+                if self.mode == Mode::Dock && self.dock.editing && hit == Hit::Empty {
+                    let mut pt = POINT::default();
+                    let _ = unsafe { GetCursorPos(&mut pt) };
+                    let c = self.dock.center_px;
+                    let grab = if dock_layout::is_vertical(self.dock.edge) { pt.y - c.1 } else { pt.x - c.0 };
+                    self.dock.moving = Some(grab);
+                }
                 let _ = unsafe { SetCapture(hwnd) };
                 self.render();
             }
@@ -955,6 +1167,16 @@ impl Handler for Panel {
                 }
                 _ => return None,
             },
+            WM_SETCURSOR
+                if self.mode == Mode::Dock
+                    && self.dock.editing
+                    && (self.dock.moving.is_some() || self.hover_hit == Hit::Empty)
+                    && (lparam.0 & 0xFFFF) as u32 == HTCLIENT =>
+            {
+                // 판을 옮길 수 있는 곳은 이동 커서
+                unsafe { SetCursor(LoadCursorW(None, IDC_SIZEALL).ok()) };
+                return Some(LRESULT(1));
+            }
             WM_ERASEBKGND => {}
             WM_PAINT => {
                 // 유리 창은 검게 칠해 둔다: 흐림 효과는 검은(빈) 부분에 비친다

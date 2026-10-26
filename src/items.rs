@@ -1,4 +1,4 @@
-//! 독에 놓이는 항목(유튜브 / 앱 / 웹 주소)과 입력 검증.
+//! 독에 놓이는 항목(유튜브 / 앱 / 웹 주소 / 파일·폴더)과 입력 검증.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +28,13 @@ pub enum Item {
         #[serde(default)]
         name: String,
     },
+    /// 파일이나 폴더 (셸로 연다: 문서는 연결된 프로그램, 폴더는 탐색기)
+    Path {
+        id: String,
+        path: String,
+        #[serde(default)]
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +47,7 @@ pub enum ItemError {
 impl Item {
     pub fn id(&self) -> &str {
         match self {
-            Item::Youtube { id, .. } | Item::App { id, .. } | Item::Web { id, .. } => id,
+            Item::Youtube { id, .. } | Item::App { id, .. } | Item::Web { id, .. } | Item::Path { id, .. } => id,
         }
     }
 
@@ -52,6 +59,7 @@ impl Item {
             Item::Web { url, name, .. } => {
                 non_empty(name).map(str::to_string).unwrap_or_else(|| host_of(url).unwrap_or(url).to_string())
             }
+            Item::Path { path, name, .. } => non_empty(name).map(str::to_string).unwrap_or_else(|| path_name(path)),
         }
     }
 
@@ -69,6 +77,15 @@ impl Item {
     pub fn web(url: &str, name: &str) -> Result<Item, ItemError> {
         Ok(Item::Web { id: new_id(), url: normalize_url(url)?, name: name.trim().to_string() })
     }
+}
+
+/// 경로의 마지막 이름 (`C:\\` 같은 드라이브는 그대로)
+pub fn path_name(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    std::path::Path::new(trimmed)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn non_empty(s: &str) -> Option<&str> {

@@ -46,7 +46,7 @@ pub const MAX_GAP: f32 = 28.0;
 pub const EDGE: f32 = 6.0;
 pub const MENU_BUTTON: f32 = 28.0;
 pub const PALETTE_BUTTON: f32 = 40.0;
-pub const PANEL_HOVER_SCALE: f32 = 1.15;
+pub const PANEL_HOVER_SCALE: f32 = 1.08;
 pub const PICKER_RADIUS: f32 = 84.0;
 pub const SWATCH: f32 = 34.0;
 pub const MIN_W: f32 = 240.0;
@@ -64,6 +64,10 @@ pub enum Hit {
     Menu,
     /// 헤더 빈 곳 (드래그하면 창 이동)
     Header,
+    /// 독 수정 모드 단추: 작게 / 크게 / 완료
+    Shrink,
+    Grow,
+    Done,
     /// 창 가장자리 (크기 조절). 비트: 1=왼쪽 2=오른쪽 4=위 8=아래
     Edge(u8),
     Empty,

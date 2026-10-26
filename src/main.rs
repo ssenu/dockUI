@@ -25,7 +25,7 @@ fn main() {
 
     let data_dir = config::default_dir();
     logging::init(&data_dir.join("logs"));
-    logging::info(&format!("YT Launcher {} 시작", app::CURRENT_VERSION));
+    logging::info(&format!("{} {} 시작", app::APP_NAME, app::CURRENT_VERSION));
 
     // 핸들은 프로세스가 끝날 때까지 쥐고 있는다 (설치 프로그램이 실행 중 감지에 씀)
     let (_mutex, existed) = acquire_mutex(MUTEX_NAME);

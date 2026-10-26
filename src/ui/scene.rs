@@ -10,8 +10,12 @@ use std::path::PathBuf;
 
 pub const WINDOW_RADIUS: f32 = 8.0;
 pub const ICON_RADIUS: f32 = 14.0;
-pub const TITLE: &str = "YT Launcher";
+pub const TITLE: &str = crate::app::APP_NAME;
 pub const BYLINE: &str = "by_ssenu";
+/// 독 판 아래에 보이는 만든 사람
+pub const CREDIT: &str = "by ssenu";
+/// 독 수정 모드 안내
+pub const EDIT_HINT: &str = "빈 곳을 끌어 옮기기 · 아이콘을 끌어 순서 바꾸기";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TileKind {
@@ -19,6 +23,8 @@ pub enum TileKind {
     Youtube,
     App,
     Web,
+    /// 파일·폴더 (셸 아이콘)
+    Path,
     /// 새 버전이 있을 때 목록 끝에 붙는 업데이트 단추 (끌기·수정·삭제 불가)
     Update,
 }
@@ -132,8 +138,8 @@ fn draw_letter_icon(g: &Gfx, r: RectF, seed: &str, letter: &str) {
 fn draw_tile(g: &Gfx, tile: &TileView, r: RectF, lift: f32) {
     let radius = ICON_RADIUS * r.w / 56.0;
     let opacity = if tile.missing { 0.4 } else { 1.0 };
-    // 앱 아이콘은 자체 모양(투명 배경)이 있으므로 그림자 없이 그대로 그린다
-    if tile.kind == TileKind::App
+    // 앱·파일 아이콘은 자체 모양(투명 배경)이 있으므로 그림자 없이 그대로 그린다
+    if matches!(tile.kind, TileKind::App | TileKind::Path)
         && let Some(path) = &tile.icon
         && g.image(path, r, opacity)
     {
@@ -398,6 +404,61 @@ pub struct DockScene<'a> {
     pub drag: Option<(usize, Pt)>,
     /// 끌어 놓을 수 있는 것이 위에 있음 (강조 테두리)
     pub drop_hover: bool,
+    /// 마우스가 올라간 칸 (수정 단추 강조)
+    pub hovered: Option<usize>,
+}
+
+/// 판 아래 "by ssenu" 자리 (콘텐츠 창 기준 DIP). 창 영역 계산에도 쓴다.
+pub fn credit_rect(g: &Gfx, bar: RectF) -> RectF {
+    let w = g.measure(CREDIT, 9.5, Weight::SemiBold) + 12.0;
+    RectF::new(bar.center().x - w / 2.0, bar.bottom() + 1.0, w, dock_layout::CREDIT_H - 1.0)
+}
+
+/// 수정 모드 안내 자리: 판에서 화면 안쪽으로 (콘텐츠 창 기준 DIP)
+pub fn edit_hint_rect(g: &Gfx, bar: RectF, edge: DockEdge, bounds: (f32, f32)) -> RectF {
+    let room = if dock_layout::is_vertical(edge) { bounds.0 - bar.right() - 12.0 } else { bounds.0 };
+    let (w, h) = tooltip_size(g, EDIT_HINT, room.max(68.0));
+    let c = bar.center();
+    let (x, y) = match edge {
+        DockEdge::Bottom => (c.x - w / 2.0, bar.y - h - 10.0),
+        DockEdge::Top => (c.x - w / 2.0, bar.bottom() + dock_layout::CREDIT_H + 8.0),
+        DockEdge::Left => (bar.right() + 10.0, bar.y),
+        DockEdge::Right => (bar.x - w - 10.0, bar.y),
+    };
+    let x = x.clamp(4.0, (bounds.0 - w - 4.0).max(4.0));
+    let y = y.clamp(4.0, (bounds.1 - h - 4.0).max(4.0));
+    RectF::new(x, y, w, h)
+}
+
+fn draw_credit(g: &Gfx, bar: RectF) {
+    let r = credit_rect(g, bar);
+    g.fill_round_rect(r, r.h / 2.0, Color::hex(0x000000, 0.35));
+    g.text(CREDIT, r, 9.5, Weight::SemiBold, Align::Center, Color::hex(0xFFFFFF, 0.9));
+}
+
+/// 수정 모드 단추: 작게(−) / 크게(＋)는 납작한 원, 완료는 강조색 원에 체크
+fn draw_edit_button(g: &Gfx, r: RectF, slot: Slot, p: &Palette, hover: bool) {
+    let c = r.center();
+    let radius = r.w * 0.40;
+    let arm = radius * 0.42;
+    match slot {
+        Slot::Done => {
+            g.fill_circle(c, radius, if hover { ACCENT.shade(-0.1) } else { ACCENT });
+            let white = Color::hex(0xFFFFFF, 1.0);
+            let w = radius * 0.16;
+            g.line(Pt { x: c.x - arm, y: c.y + arm * 0.05 }, Pt { x: c.x - arm * 0.25, y: c.y + arm * 0.75 }, white, w);
+            g.line(Pt { x: c.x - arm * 0.25, y: c.y + arm * 0.75 }, Pt { x: c.x + arm, y: c.y - arm * 0.65 }, white, w);
+        }
+        _ => {
+            g.fill_circle(c, radius, p.text.with_alpha(if hover { 0.18 } else { 0.09 }));
+            g.stroke_circle(c, radius - 0.5, p.divider, 1.0);
+            let w = radius * 0.13;
+            g.line(Pt { x: c.x - arm, y: c.y }, Pt { x: c.x + arm, y: c.y }, p.text, w);
+            if slot == Slot::Grow {
+                g.line(Pt { x: c.x, y: c.y - arm }, Pt { x: c.x, y: c.y + arm }, p.text, w);
+            }
+        }
+    }
 }
 
 /// 독 말풍선 사각형: 판 반대쪽(화면 안쪽)에 띄운다. 창 영역 계산에도 쓴다.
@@ -420,6 +481,9 @@ pub fn dock_tooltip_rect(g: &Gfx, text: &str, icon: RectF, edge: DockEdge, bound
 pub fn dock_tooltip_text<'a>(layout: &DockLayout, tiles: &'a [TileView], slot: usize) -> &'a str {
     match layout.slots().get(slot) {
         Some(Slot::Tile(t)) => tiles.get(*t).map_or("", |v| v.label.as_str()),
+        Some(Slot::Shrink) => "아이콘 작게",
+        Some(Slot::Grow) => "아이콘 크게",
+        Some(Slot::Done) => "수정 끝내기",
         _ => "항목 추가",
     }
 }
@@ -433,6 +497,21 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
     g.stroke_round_rect(bar, WINDOW_RADIUS, p.divider, 1.0);
     if s.drop_hover {
         draw_drop_highlight(g, bar);
+    } else if s.layout.editing {
+        let inner = RectF::new(bar.x + 1.0, bar.y + 1.0, bar.w - 2.0, bar.h - 2.0);
+        g.stroke_round_rect(inner, WINDOW_RADIUS - 1.0, ACCENT, 1.6);
+    }
+    draw_credit(g, bar);
+    if let Some(along) = s.mag.separator {
+        let inset = dock_layout::PAD + 6.0;
+        let (a, b) = if dock_layout::is_vertical(s.layout.edge) {
+            let y = s.center.1 + along;
+            (Pt { x: bar.x + inset, y }, Pt { x: bar.right() - inset, y })
+        } else {
+            let x = s.center.0 + along;
+            (Pt { x, y: bar.y + inset }, Pt { x, y: bar.bottom() - inset })
+        };
+        g.line(a, b, p.divider, 1.0);
     }
 
     for (i, slot) in s.layout.slots().iter().enumerate() {
@@ -451,7 +530,11 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
                 }
             }
             Slot::Add => draw_add(g, r, p),
+            Slot::Shrink | Slot::Grow | Slot::Done => draw_edit_button(g, r, *slot, p, s.hovered == Some(i)),
         }
+    }
+    if s.layout.editing && s.drag.is_none() && s.tooltip.is_none() {
+        draw_tooltip_box(g, EDIT_HINT, edit_hint_rect(g, bar, s.layout.edge, s.size));
     }
     if let Some((from, pos)) = s.drag {
         let size = dock_layout::ICON * 1.1;
@@ -612,17 +695,21 @@ mod tests {
             ..Default::default()
         });
         for (edge, name) in [(DockEdge::Bottom, "bottom"), (DockEdge::Left, "left")] {
-            let layout = DockLayout::compute(edge, tiles.len());
-            let mag = layout.magnified(Some(layout.rest[1]), 1.0);
+            let editing = edge == DockEdge::Left;
+            let layout = DockLayout::compute(edge, tiles.len(), editing);
+            let mag = if editing { layout.magnified(None, 0.0) } else { layout.magnified(Some(layout.rest[1]), 1.0) };
             let max = layout.max_length();
             let vertical = dock_layout::is_vertical(edge);
             let (w, h) = if vertical {
                 (dock_layout::THICK + layout.headroom(), max + 2.0 * layout.side_room())
             } else {
-                (max + 2.0 * layout.side_room(), dock_layout::THICK + layout.headroom())
+                (max + 2.0 * layout.side_room(), dock_layout::THICK + layout.headroom() + dock_layout::CREDIT_H)
             };
-            let center =
-                if vertical { (dock_layout::THICK / 2.0, h / 2.0) } else { (w / 2.0, h - dock_layout::THICK / 2.0) };
+            let center = if vertical {
+                (dock_layout::THICK / 2.0, h / 2.0)
+            } else {
+                (w / 2.0, h - dock_layout::CREDIT_H - dock_layout::THICK / 2.0)
+            };
             let gfx = Gfx::offscreen((w * 2.0) as u32, (h * 2.0) as u32, 2.0).unwrap();
             let state = DockScene {
                 layout: &layout,
@@ -633,9 +720,10 @@ mod tests {
                 acrylic: false,
                 tiles: &tiles,
                 pressed: None,
-                tooltip: Some(1),
+                tooltip: if editing { None } else { Some(1) },
                 drag: None,
                 drop_hover: false,
+                hovered: if editing { Some(layout.slots().len() - 1) } else { None },
             };
             gfx.begin();
             draw_dock(&gfx, &state);

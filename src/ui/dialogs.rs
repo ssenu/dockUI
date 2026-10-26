@@ -34,7 +34,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_QUIT, WM_SETCURSOR, WM_SETFONT, WS_CAPTION, WS_CHILD,
     WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
-use windows::core::{HSTRING, w};
+use windows::core::HSTRING;
 
 const DIALOG_CLASS: &str = "YTLauncherDialog";
 /// 정적 글자가 넘치면 … 으로 줄인다 (SystemServices 기능을 켜지 않으려고 값만 둔다)
@@ -48,9 +48,12 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const ID_MAIN: i32 = 101;
 const ID_NAME: i32 = 102;
 const ID_PICK: i32 = 105;
+const ID_PICK_FILE: i32 = 106;
+const ID_PICK_FOLDER: i32 = 107;
 const ID_KIND_YOUTUBE: i32 = 111;
 const ID_KIND_APP: i32 = 112;
 const ID_KIND_WEB: i32 = 113;
+const ID_KIND_PATH: i32 = 114;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Kind {
@@ -58,6 +61,7 @@ pub enum Kind {
     Youtube,
     App,
     Web,
+    Path,
 }
 
 impl Kind {
@@ -66,6 +70,7 @@ impl Kind {
             ID_KIND_YOUTUBE => Some(Kind::Youtube),
             ID_KIND_APP => Some(Kind::App),
             ID_KIND_WEB => Some(Kind::Web),
+            ID_KIND_PATH => Some(Kind::Path),
             _ => None,
         }
     }
@@ -75,14 +80,20 @@ impl Kind {
             Kind::Youtube => ID_KIND_YOUTUBE,
             Kind::App => ID_KIND_APP,
             Kind::Web => ID_KIND_WEB,
+            Kind::Path => ID_KIND_PATH,
         }
+    }
+
+    /// 첫 칸이 글자 입력칸인가 (앱·파일은 고르기 단추)
+    fn has_text_field(self) -> bool {
+        matches!(self, Kind::Youtube | Kind::Web)
     }
 
     /// 첫 입력칸 빈 칸 안내
     fn main_cue(self) -> &'static str {
         match self {
             Kind::Youtube => "예: 로파이 음악",
-            Kind::App => "",
+            Kind::App | Kind::Path => "",
             Kind::Web => "예: naver.com",
         }
     }
@@ -93,6 +104,7 @@ impl Kind {
             Kind::Youtube => "비우면 검색어를 그대로 씁니다",
             Kind::App => "비우면 앱 이름을 씁니다",
             Kind::Web => "비우면 주소의 사이트 이름을 씁니다",
+            Kind::Path => "비우면 파일·폴더 이름을 씁니다",
         }
     }
 }
@@ -113,6 +125,11 @@ pub enum ItemInput {
         url: String,
         name: String,
     },
+    /// 파일이나 폴더의 전체 경로
+    Path {
+        path: String,
+        name: String,
+    },
 }
 
 impl ItemInput {
@@ -121,6 +138,7 @@ impl ItemInput {
             ItemInput::Youtube { .. } => Kind::Youtube,
             ItemInput::App { .. } => Kind::App,
             ItemInput::Web { .. } => Kind::Web,
+            ItemInput::Path { .. } => Kind::Path,
         }
     }
 }
@@ -143,6 +161,8 @@ struct DialogState {
     youtube_text: String,
     web_text: String,
     app: Option<AppChoice>,
+    /// 고른 파일·폴더 경로
+    path: Option<String>,
     result: Option<ItemInput>,
     done: bool,
     scale: f32,
@@ -178,7 +198,9 @@ fn show(hwnd: HWND, visible: bool) {
 }
 
 pub fn warn(owner: HWND, text: &str) {
-    unsafe { MessageBoxW(Some(owner), &HSTRING::from(text), w!("YT Launcher"), MB_OK | MB_ICONWARNING) };
+    unsafe {
+        MessageBoxW(Some(owner), &HSTRING::from(text), &HSTRING::from(crate::app::APP_NAME), MB_OK | MB_ICONWARNING)
+    };
 }
 
 fn set_cue(edit: HWND, text: &str) {
@@ -198,7 +220,7 @@ impl DialogState {
         match self.kind {
             Kind::Youtube => self.youtube_text = window_text(main),
             Kind::Web => self.web_text = window_text(main),
-            Kind::App => {}
+            Kind::App | Kind::Path => {}
         }
         self.kind = kind;
         self.error = None;
@@ -209,13 +231,13 @@ impl DialogState {
     fn show_kind(&mut self) {
         let (dialog, kind) = (self.hwnd, self.kind);
         let main = item(dialog, ID_MAIN);
-        show(main, kind != Kind::App);
+        show(main, kind.has_text_field());
         set_cue(main, kind.main_cue());
         set_cue(item(dialog, ID_NAME), kind.hint());
         match kind {
             Kind::Youtube => set_text(main, &self.youtube_text),
             Kind::Web => set_text(main, &self.web_text),
-            Kind::App => {}
+            Kind::App | Kind::Path => {}
         }
         invalidate(dialog);
     }
@@ -234,6 +256,10 @@ impl DialogState {
             Kind::Web => match normalize_url(&main) {
                 Ok(url) => Ok(ItemInput::Web { url, name }),
                 Err(_) => Err(("올바른 주소를 입력하세요. 예: naver.com", ID_MAIN)),
+            },
+            Kind::Path => match &self.path {
+                Some(path) => Ok(ItemInput::Path { path: path.clone(), name }),
+                None => Err(("열 파일이나 폴더를 고르세요.", ID_PICK_FILE)),
             },
         }
     }
@@ -255,6 +281,7 @@ impl DialogState {
                         pressed: self.pressed,
                         focus: self.focused_field(),
                         app_name: self.app.as_ref().map(|a| a.name.as_str()),
+                        path: self.path.as_deref(),
                         error: self.error.as_ref().map(|(t, f)| (t.as_str(), *f)),
                     },
                 );
@@ -304,6 +331,8 @@ fn command_of(target: Target) -> i32 {
         Target::Close | Target::Cancel => IDCANCEL.0,
         Target::Ok => IDOK.0,
         Target::Pick => ID_PICK,
+        Target::PickFile => ID_PICK_FILE,
+        Target::PickFolder => ID_PICK_FOLDER,
         Target::Card(kind) => kind.button_id(),
     }
 }
@@ -350,6 +379,13 @@ impl DialogWindow {
                 st.error = None;
                 st.show_kind();
             }
+        } else if id == ID_PICK_FILE || id == ID_PICK_FOLDER {
+            if let Some(path) = pick_path(hwnd, id == ID_PICK_FOLDER) {
+                let mut st = self.state.borrow_mut();
+                st.path = Some(path);
+                st.error = None;
+                st.show_kind();
+            }
         } else if let Some(kind) = Kind::from_id(id) {
             let changed = {
                 let mut st = self.state.borrow_mut();
@@ -359,7 +395,7 @@ impl DialogWindow {
                 }
                 changed
             };
-            let target = if kind == Kind::App { ID_NAME } else { ID_MAIN };
+            let target = if kind.has_text_field() { ID_MAIN } else { ID_NAME };
             if changed {
                 let _ = unsafe { SetFocus(Some(item(hwnd, target))) };
             }
@@ -430,7 +466,7 @@ impl Handler for DialogWindow {
                     unsafe { SetCapture(hwnd) };
                 } else if form::name_field().contains(p) {
                     let _ = unsafe { SetFocus(Some(item(hwnd, ID_NAME))) };
-                } else if form::main_field().contains(p) && st.kind != Kind::App {
+                } else if form::main_field().contains(p) && st.kind.has_text_field() {
                     let _ = unsafe { SetFocus(Some(item(hwnd, ID_MAIN))) };
                 }
                 invalidate(hwnd);
@@ -619,6 +655,29 @@ pub fn run_modal(owner: HWND, dialog: HWND, focus: HWND, done: &dyn Fn() -> bool
     }
 }
 
+/// 파일 또는 폴더 고르기 (윈도우 기본 열기 창). 고른 전체 경로, 취소하면 None.
+fn pick_path(owner: HWND, folder: bool) -> Option<String> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{
+        FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
+    };
+    // SAFETY: COM 열기 창을 만들어 고른 항목의 파일 시스템 경로를 읽고 문자열 메모리를 돌려준다
+    unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        let extra = if folder { FOS_PICKFOLDERS } else { FOS_FILEMUSTEXIST };
+        dialog.SetOptions(options | extra | FOS_FORCEFILESYSTEM).ok()?;
+        let title = if folder { "폴더 고르기" } else { "파일 고르기" };
+        let _ = dialog.SetTitle(&HSTRING::from(title));
+        dialog.Show(Some(owner)).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const _));
+        path
+    }
+}
+
 /// 항목 입력 창을 띄우고 닫힐 때까지 기다린다. 저장하면 `Some`, 취소하면 `None`.
 pub fn item_dialog(owner: HWND, title: &str, initial: &Initial) -> Option<ItemInput> {
     let dpi = unsafe { GetDpiForWindow(owner) }.max(96);
@@ -631,11 +690,13 @@ pub fn item_dialog(owner: HWND, title: &str, initial: &Initial) -> Option<ItemIn
         Initial::Edit(input) => (input.kind(), true),
     };
     let (mut youtube_text, mut web_text, mut app, mut name) = (String::new(), String::new(), None, String::new());
+    let mut path = None;
     if let Initial::Edit(input) = initial {
         match input.clone() {
             ItemInput::Youtube { query, name: n } => (youtube_text, name) = (query, n),
             ItemInput::App { app: a, name: n } => (app, name) = (Some(a), n),
             ItemInput::Web { url, name: n } => (web_text, name) = (url, n),
+            ItemInput::Path { path: p, name: n } => (path, name) = (Some(p), n),
         }
     }
 
@@ -655,6 +716,7 @@ pub fn item_dialog(owner: HWND, title: &str, initial: &Initial) -> Option<ItemIn
         youtube_text,
         web_text,
         app,
+        path,
         result: None,
         done: false,
         scale,
@@ -682,7 +744,7 @@ pub fn item_dialog(owner: HWND, title: &str, initial: &Initial) -> Option<ItemIn
         st.hwnd = dialog;
         st.show_kind();
     }
-    let focus = if kind == Kind::App { name_edit } else { main };
+    let focus = if kind.has_text_field() { main } else { name_edit };
     run_modal(owner, dialog, focus, &|| state.borrow().done);
     let _ = unsafe { DeleteObject(HGDIOBJ(font.0)) };
     state.borrow_mut().result.take()
@@ -836,6 +898,9 @@ mod tests {
         press_later(&[IDOK.0]);
         let saved = item_dialog(owner, "항목 수정", &edit(ItemInput::App { app: app.clone(), name: "".into() }));
         assert_eq!(saved, Some(ItemInput::App { app, name: "".into() }));
+        press_later(&[IDOK.0]);
+        let folder = ItemInput::Path { path: r"C:\Users".into(), name: "사용자".into() };
+        assert_eq!(item_dialog(owner, "항목 수정", &edit(folder.clone())), Some(folder));
     }
 
     #[test]

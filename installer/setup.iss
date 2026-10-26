@@ -1,8 +1,9 @@
-﻿; YT Launcher 설치 스크립트. scripts/build.ps1이 /DAppVersion=<버전>을 넘긴다.
+﻿; Dock UI(옛 이름 YT Launcher) 설치 스크립트. scripts/build.ps1이 /DAppVersion=<버전>을 넘긴다.
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
-#define AppName "YT Launcher"
+; 보이는 이름만 바꾼다. AppId·설치 폴더·exe·설치 파일 이름·뮤텍스·Run 값은 업데이트 호환을 위해 그대로
+#define AppName "Dock UI"
 #define AppExe "YTLauncher.exe"
 
 [Setup]
@@ -41,6 +42,9 @@ Name: "desktopicon"; Description: "바탕화면 바로가기 만들기"; GroupDe
 [InstallDelete]
 ; 0.1.x(파이썬)에서 올라올 때 남은 라이브러리 폴더를 지운다. 0.2.0부터는 exe 하나뿐이다.
 Type: filesandordirs; Name: "{app}\_internal"
+; 옛 이름(YT Launcher) 바로가기
+Type: files; Name: "{autoprograms}\YT Launcher.lnk"
+Type: files; Name: "{autodesktop}\YT Launcher.lnk"
 
 [Files]
 Source: "..\dist\YTLauncher\YTLauncher.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -54,7 +58,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 ; 일반 설치: 마지막 화면의 "실행" 체크박스
-Filename: "{app}\{#AppExe}"; Description: "YT Launcher 실행"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Description: "{#AppName} 실행"; Flags: nowait postinstall skipifsilent
 ; 조용한 설치(앱 내 자동 업데이트): 끝나면 바로 다시 실행
 Filename: "{app}\{#AppExe}"; Flags: nowait; Check: WizardSilent
 

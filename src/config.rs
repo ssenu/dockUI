@@ -65,6 +65,10 @@ pub struct Config {
     pub last_run_version: String,
     pub notified_version: String,
     pub chrome_notice_shown: bool,
+    /// 독 위치: 가장자리를 따라 0..1 (0.5가 가운데)
+    pub dock_offset: f32,
+    /// 독 아이콘 크기 (DIP)
+    pub dock_size: u32,
 }
 
 impl Default for Config {
@@ -81,6 +85,8 @@ impl Default for Config {
             last_run_version: String::new(),
             notified_version: String::new(),
             chrome_notice_shown: false,
+            dock_offset: 0.5,
+            dock_size: crate::ui::dock_layout::DEFAULT_SIZE,
         }
     }
 }
@@ -208,6 +214,7 @@ pub fn migrate_v1(v1: &Value) -> Option<Config> {
         last_run_version: text("last_run_version"),
         notified_version: text("notified_version"),
         chrome_notice_shown: v1.get("chrome_notice_shown").and_then(Value::as_bool).unwrap_or(false),
+        ..Config::default()
     })
 }
 

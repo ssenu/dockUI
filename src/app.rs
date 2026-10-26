@@ -35,7 +35,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, w};
 
-pub const APP_NAME: &str = "YT Launcher";
+/// 화면에 보이는 이름 (exe·설치 파일·데이터 폴더 이름은 업데이트 호환을 위해 그대로 둔다)
+pub const APP_NAME: &str = "Dock UI";
 pub const BYLINE: &str = "by_ssenu";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const RELEASES_URL: &str = "https://github.com/ssenu/dockUI/releases/latest";
@@ -62,6 +63,7 @@ const CMD_ADD: u32 = 23;
 const CMD_THEME: u32 = 40;
 const CMD_MODE_DOCK: u32 = 30;
 const CMD_MODE_PANEL: u32 = 31;
+const CMD_DOCK_EDIT: u32 = 36;
 const CMD_EDGE_BOTTOM: u32 = 32;
 const CMD_EDGE_TOP: u32 = 33;
 const CMD_EDGE_LEFT: u32 = 34;
@@ -142,6 +144,7 @@ pub fn tile_views(items: &[Item], status: &TileStatus) -> Vec<TileView> {
                 Item::Youtube { query, .. } => (TileKind::Youtube, badge_of(query)),
                 Item::App { .. } => (TileKind::App, label.chars().take(1).collect()),
                 Item::Web { .. } => (TileKind::Web, label.chars().take(1).collect::<String>().to_uppercase()),
+                Item::Path { .. } => (TileKind::Path, label.chars().take(1).collect::<String>().to_uppercase()),
             };
             TileView {
                 id: id.to_string(),
@@ -164,6 +167,7 @@ pub fn item_from_input(id: String, input: ItemInput) -> Item {
             Item::App { id, name: if name.is_empty() { app.name } else { name }, target: app.target, exe: app.exe }
         }
         ItemInput::Web { url, name } => Item::Web { id, url, name },
+        ItemInput::Path { path, name } => Item::Path { id, path, name },
     }
 }
 
@@ -175,6 +179,7 @@ pub fn input_of(item: &Item) -> ItemInput {
             ItemInput::App { app: AppChoice { name: name.clone(), target, exe }, name }
         }
         Item::Web { url, name, .. } => ItemInput::Web { url, name },
+        Item::Path { path, name, .. } => ItemInput::Path { path, name },
     }
 }
 
@@ -183,6 +188,7 @@ pub fn icon_source_changed(before: &Item, after: &Item) -> bool {
     match (before, after) {
         (Item::App { target: a, .. }, Item::App { target: b, .. }) => a != b,
         (Item::Web { url: a, .. }, Item::Web { url: b, .. }) => a != b,
+        (Item::Path { path: a, .. }, Item::Path { path: b, .. }) => a != b,
         _ => false,
     }
 }
@@ -237,7 +243,7 @@ fn update_tile(version: &str, downloading: bool, progress: Option<u8>) -> TileVi
     TileView { id: UPDATE_TILE_ID.to_string(), label, badge, kind: TileKind::Update, ..Default::default() }
 }
 
-/// 끌어다 놓은 것 → 입력 (exe·바로가기는 앱, .url 파일과 주소는 웹). 그 밖은 None.
+/// 끌어다 놓은 것 → 입력 (exe·바로가기는 앱, .url 파일과 주소는 웹, 그 밖의 파일·폴더는 파일 항목)
 fn input_from_drop(d: &Dropped) -> Option<ItemInput> {
     match d {
         Dropped::Url(url) => normalize_url(url).ok().map(|url| ItemInput::Web { url, name: String::new() }),
@@ -252,6 +258,9 @@ fn input_from_drop(d: &Dropped) -> Option<ItemInput> {
                     let text = std::fs::read_to_string(path).ok()?;
                     let url = internet_shortcut_url(&text)?;
                     normalize_url(&url).ok().map(|url| ItemInput::Web { url, name: String::new() })
+                }
+                _ if path.exists() => {
+                    Some(ItemInput::Path { path: path.to_string_lossy().into_owned(), name: String::new() })
                 }
                 _ => None,
             }
@@ -269,6 +278,7 @@ fn same_target(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (Item::App { target: x, .. }, Item::App { target: y, .. }) => x.eq_ignore_ascii_case(y),
         (Item::Web { url: x, .. }, Item::Web { url: y, .. }) => x.trim_end_matches('/') == y.trim_end_matches('/'),
+        (Item::Path { path: x, .. }, Item::Path { path: y, .. }) => x.eq_ignore_ascii_case(y),
         _ => false,
     }
 }
@@ -283,7 +293,7 @@ fn drop_message(added: usize, duplicate: usize, unsupported: usize) -> String {
         parts.push(format!("이미 있는 {duplicate}개는 건너뛰었습니다."));
     }
     if unsupported > 0 {
-        parts.push(format!("앱(exe·바로가기)과 웹 주소만 추가할 수 있어 {unsupported}개는 건너뛰었습니다."));
+        parts.push(format!("읽을 수 없는 {unsupported}개는 건너뛰었습니다."));
     }
     parts.join(" ")
 }
@@ -349,6 +359,8 @@ pub struct App {
     downloading: bool,
     /// 내려받기 진행률 (내려받는 중일 때만)
     progress: Option<u8>,
+    /// 독 수정 모드가 켜져 있는지 (트레이 메뉴 체크)
+    dock_editing: bool,
     debounce: Debounce,
     events_tx: Sender<Event>,
     events_rx: Receiver<Event>,
@@ -377,6 +389,7 @@ impl App {
             release: None,
             downloading: false,
             progress: None,
+            dock_editing: false,
             debounce: Debounce::default(),
             events_tx,
             events_rx,
@@ -540,6 +553,8 @@ impl App {
             theme: self.config.theme,
             locked: self.config.locked,
             tiles: self.tiles(),
+            dock_offset: self.config.dock_offset,
+            dock_size: self.config.dock_size,
         };
         match Panel::open(spec, notify) {
             Ok(handle) => self.panel = Some(handle),
@@ -579,6 +594,13 @@ impl App {
             }
             UiEvent::MenuRequested => self.show_menu(),
             UiEvent::Dropped(dropped) => self.add_dropped(dropped),
+            UiEvent::DockChanged { edge, offset, size } => {
+                self.config.dock_edge = edge;
+                self.config.dock_offset = offset;
+                self.config.dock_size = size;
+                self.save();
+            }
+            UiEvent::EditingChanged(on) => self.dock_editing = on,
         }
     }
 
@@ -660,6 +682,20 @@ impl App {
             let result = match &item {
                 Item::Youtube { query, .. } => chrome::open_url(&chrome::build_search_url(query), Some("YouTube")),
                 Item::Web { url, .. } => chrome::open_url(url, None),
+                Item::Path { id, path, .. } => {
+                    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+                    let opened = if std::path::Path::new(path).exists() {
+                        shell::open(path)
+                    } else {
+                        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+                    };
+                    if let Err(e) = opened {
+                        logging::warn(&format!("파일 열기 실패 ({path}): {e}"));
+                        send(Event::LaunchFailed(id.clone()));
+                    }
+                    unsafe { CoUninitialize() };
+                    return;
+                }
                 Item::App { id, target, exe, .. } => {
                     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
                     let key = AppKey { target: target.clone(), exe: exe.clone() };
@@ -683,6 +719,13 @@ impl App {
         self.config.dock_edge = edge;
         self.save();
         self.panel_send(PanelCmd::SetMode(mode, edge));
+    }
+
+    /// 메뉴에서 독 가장자리를 고르면 그 가장자리 가운데로
+    fn set_edge(&mut self, edge: DockEdge) {
+        self.config.dock_offset = 0.5;
+        self.panel_send(PanelCmd::SetDockPlacement { offset: 0.5, size: self.config.dock_size });
+        self.set_mode(Mode::Dock, edge);
     }
 
     fn set_theme(&mut self, theme: Theme) {
@@ -798,6 +841,7 @@ impl App {
             ),
             MenuEntry::Separator,
             MenuEntry::checked(CMD_MODE_DOCK, "독 모드", dock),
+            MenuEntry::checked(CMD_DOCK_EDIT, "    독 수정 모드 (옮기기·크기·순서)", dock && self.dock_editing),
             MenuEntry::checked(CMD_MODE_PANEL, "패널 모드", !dock),
         ];
         if dock {
@@ -843,10 +887,17 @@ impl App {
             }
             CMD_MODE_DOCK => self.set_mode(Mode::Dock, self.config.dock_edge),
             CMD_MODE_PANEL => self.set_mode(Mode::Panel, self.config.dock_edge),
-            CMD_EDGE_BOTTOM => self.set_mode(Mode::Dock, DockEdge::Bottom),
-            CMD_EDGE_TOP => self.set_mode(Mode::Dock, DockEdge::Top),
-            CMD_EDGE_LEFT => self.set_mode(Mode::Dock, DockEdge::Left),
-            CMD_EDGE_RIGHT => self.set_mode(Mode::Dock, DockEdge::Right),
+            CMD_DOCK_EDIT => {
+                let on = !(self.config.mode == Mode::Dock && self.dock_editing);
+                if on && self.config.mode != Mode::Dock {
+                    self.set_mode(Mode::Dock, self.config.dock_edge);
+                }
+                self.panel_send(PanelCmd::SetEditing(on));
+            }
+            CMD_EDGE_BOTTOM => self.set_edge(DockEdge::Bottom),
+            CMD_EDGE_TOP => self.set_edge(DockEdge::Top),
+            CMD_EDGE_LEFT => self.set_edge(DockEdge::Left),
+            CMD_EDGE_RIGHT => self.set_edge(DockEdge::Right),
             CMD_RESET_GEOMETRY => self.panel_send(PanelCmd::ResetGeometry),
             CMD_LOCK => {
                 self.config.locked = !self.config.locked;
@@ -912,7 +963,7 @@ impl Handler for App {
                         Event::LaunchFailed(id) => {
                             self.missing.insert(id);
                             self.refresh_tiles();
-                            self.notify("앱을 찾을 수 없습니다. 수정에서 다시 선택하세요.");
+                            self.notify("실행할 앱이나 파일을 찾을 수 없습니다. 수정에서 다시 고르세요.");
                         }
                     }
                 }
@@ -1092,8 +1143,13 @@ mod tests {
     fn dropped_urls_and_shortcuts_become_web_items() {
         let web = input_from_drop(&Dropped::Url("https://naver.com".into()));
         assert_eq!(web, Some(ItemInput::Web { url: "https://naver.com".into(), name: String::new() }));
-        assert_eq!(input_from_drop(&Dropped::File("C:/docs/a.txt".into())), None);
-        assert_eq!(input_from_drop(&Dropped::File("C:/folder".into())), None);
+        // 없는 경로는 건너뛰고, 있는 파일·폴더는 파일 항목
+        assert_eq!(input_from_drop(&Dropped::File("C:/없는/a.txt".into())), None);
+        let dir = std::env::temp_dir();
+        assert_eq!(
+            input_from_drop(&Dropped::File(dir.clone())),
+            Some(ItemInput::Path { path: dir.to_string_lossy().into_owned(), name: String::new() })
+        );
         let ini = "[InternetShortcut]\r\nURL=https://github.com/ssenu\r\nIconIndex=0";
         assert_eq!(internet_shortcut_url(ini), Some("https://github.com/ssenu".into()));
         assert_eq!(internet_shortcut_url("[InternetShortcut]"), None);
@@ -1108,7 +1164,9 @@ mod tests {
         assert!(same_target(&app("C:/X/app.exe"), &app("c:/x/APP.exe")));
         assert!(!same_target(&app("C:/X/app.exe"), &web("C:/X/app.exe")));
         assert_eq!(drop_message(2, 0, 0), "2개 항목을 추가했습니다.");
-        assert!(drop_message(0, 1, 1).contains("이미 있는 1개") && drop_message(0, 1, 1).contains("웹 주소만"));
+        assert!(drop_message(0, 1, 1).contains("이미 있는 1개") && drop_message(0, 1, 1).contains("읽을 수 없는 1개"));
+        let path = |p: &str| Item::Path { id: new_id(), path: p.into(), name: String::new() };
+        assert!(same_target(&path("C:/A/b.txt"), &path("c:/a/B.TXT")));
     }
 
     #[test]

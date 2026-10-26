@@ -29,7 +29,7 @@ const SOFT: Color = Color::hex(0xF3F4F6, 1.0);
 const FOOTER: Color = Color::hex(0xF8F9FB, 1.0);
 const SELECTED_BG: Color = Color::hex(0xFFF5F4, 1.0);
 
-pub const KINDS: [Kind; 3] = [Kind::Youtube, Kind::App, Kind::Web];
+pub const KINDS: [Kind; 4] = [Kind::Youtube, Kind::App, Kind::Web, Kind::Path];
 
 /// 누를 수 있는 곳
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +37,9 @@ pub enum Target {
     Close,
     Card(Kind),
     Pick,
+    /// 파일·폴더 종류의 "파일" / "폴더" 고르기 단추
+    PickFile,
+    PickFolder,
     Ok,
     Cancel,
 }
@@ -53,8 +56,9 @@ pub fn close_rect() -> RectF {
 }
 
 pub fn card_rect(i: usize) -> RectF {
-    let w = (WIDTH - 2.0 * PAD - 2.0 * 10.0) / 3.0;
-    RectF::new(PAD + i as f32 * (w + 10.0), 84.0, w, 84.0)
+    let n = KINDS.len() as f32;
+    let w = (WIDTH - 2.0 * PAD - (n - 1.0) * 8.0) / n;
+    RectF::new(PAD + i as f32 * (w + 8.0), 84.0, w, 84.0)
 }
 
 pub fn main_field() -> RectF {
@@ -80,6 +84,17 @@ pub fn pick_button() -> RectF {
     RectF::new(f.right() - 7.0 - 88.0, f.y + 7.0, 88.0, f.h - 14.0)
 }
 
+/// 파일·폴더 입력칸 오른쪽의 "파일" / "폴더" 단추
+pub fn pick_file_button() -> RectF {
+    let folder = pick_folder_button();
+    RectF::new(folder.x - 6.0 - 58.0, folder.y, 58.0, folder.h)
+}
+
+pub fn pick_folder_button() -> RectF {
+    let f = main_field();
+    RectF::new(f.right() - 7.0 - 58.0, f.y + 7.0, 58.0, f.h - 14.0)
+}
+
 /// 입력칸 안에 얹는 EDIT 컨트롤 자리
 pub fn edit_rect(field: RectF) -> RectF {
     RectF::new(field.x + 14.0, field.y + (field.h - EDIT_H) / 2.0, field.w - 28.0, EDIT_H)
@@ -90,14 +105,16 @@ fn card_label(kind: Kind) -> &'static str {
         Kind::Youtube => "유튜브",
         Kind::App => "앱",
         Kind::Web => "웹 주소",
+        Kind::Path => "파일·폴더",
     }
 }
 
 fn card_caption(kind: Kind) -> &'static str {
     match kind {
-        Kind::Youtube => "검색 결과 열기",
-        Kind::App => "PC에 설치된 앱",
-        Kind::Web => "사이트 바로 열기",
+        Kind::Youtube => "검색 결과",
+        Kind::App => "설치된 앱",
+        Kind::Web => "사이트 열기",
+        Kind::Path => "문서·폴더 열기",
     }
 }
 
@@ -106,6 +123,7 @@ fn main_label(kind: Kind) -> &'static str {
         Kind::Youtube => "유튜브 검색어",
         Kind::App => "실행할 앱",
         Kind::Web => "웹 주소",
+        Kind::Path => "열 파일이나 폴더",
     }
 }
 
@@ -122,6 +140,14 @@ pub fn hit(p: Pt, kind: Kind, fixed: bool) -> Option<Target> {
     }
     if kind == Kind::App && main_field().contains(p) {
         return Some(Target::Pick);
+    }
+    if kind == Kind::Path {
+        if pick_file_button().contains(p) {
+            return Some(Target::PickFile);
+        }
+        if pick_folder_button().contains(p) {
+            return Some(Target::PickFolder);
+        }
     }
     if !fixed {
         for (i, k) in KINDS.iter().enumerate() {
@@ -148,8 +174,22 @@ pub struct FormView<'a> {
     pub focus: Option<Field>,
     /// 고른 앱 이름 (앱 종류)
     pub app_name: Option<&'a str>,
+    /// 고른 파일·폴더 경로 (파일·폴더 종류)
+    pub path: Option<&'a str>,
     /// 입력칸 아래 빨간 안내
     pub error: Option<(&'a str, Field)>,
+}
+
+/// 너비 안에 들어가게 앞쪽을 … 으로 줄인다 (경로는 끝의 파일 이름이 중요하다)
+fn fit_tail(g: &Gfx, text: &str, size: f32, max_w: f32) -> String {
+    if g.measure(text, size, Weight::Regular) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    (1..chars.len())
+        .map(|start| format!("…{}", chars[start..].iter().collect::<String>()))
+        .find(|t| g.measure(t, size, Weight::Regular) <= max_w)
+        .unwrap_or_else(|| "…".to_string())
 }
 
 /// 종류를 나타내는 작은 둥근 타일 아이콘
@@ -176,6 +216,15 @@ fn draw_kind_icon(g: &Gfx, kind: Kind, r: RectF) {
                 let cell_rect = RectF::new(start.x + dx * (cell + gap), start.y + dy * (cell + gap), cell, cell);
                 g.fill_round_rect(cell_rect, 1.8 * s, white);
             }
+        }
+        Kind::Path => {
+            g.fill_round_rect_gradient(r, radius, Color::hex(0xF7B940, 1.0), Color::hex(0xE08A0B, 1.0));
+            // 폴더: 탭 + 몸통
+            let (w, h) = (18.0 * s, 13.0 * s);
+            let body = RectF::new(c.x - w / 2.0, c.y - h / 2.0 + 1.5 * s, w, h);
+            let tab = RectF::new(body.x, body.y - 3.0 * s, w * 0.45, 5.0 * s);
+            g.fill_round_rect(tab, 1.5 * s, white);
+            g.fill_round_rect(body, 2.0 * s, white);
         }
         Kind::Web => {
             g.fill_round_rect_gradient(r, radius, Color::hex(0x36B3A8, 1.0), Color::hex(0x1E7F87, 1.0));
@@ -327,6 +376,29 @@ pub fn draw(g: &Gfx, v: &FormView) {
         );
         let label = if v.app_name.is_some() { "다시 고르기" } else { "앱 고르기" };
         g.text(label, pick, 12.5, Weight::SemiBold, Align::Center, LABEL);
+    } else if v.kind == Kind::Path {
+        draw_field(g, main, false, main_error, false);
+        let text_r = RectF::new(main.x + 14.0, main.y, pick_file_button().x - main.x - 22.0, main.h);
+        match v.path {
+            Some(path) => {
+                let shown = fit_tail(g, path, 13.0, text_r.w);
+                g.text(&shown, text_r, 13.0, Weight::Regular, Align::Leading, TEXT)
+            }
+            None => g.text("아직 고르지 않았습니다", text_r, EDIT_FONT, Weight::Regular, Align::Leading, SUBTEXT),
+        }
+        for (target, r, label) in
+            [(Target::PickFile, pick_file_button(), "파일"), (Target::PickFolder, pick_folder_button(), "폴더")]
+        {
+            let bg = if v.pressed == Some(target) {
+                Color::hex(0xE2E5EA, 1.0)
+            } else if v.hover == Some(target) {
+                Color::hex(0xE9EBEF, 1.0)
+            } else {
+                SOFT
+            };
+            g.fill_round_rect(r, 7.0, bg);
+            g.text(label, r, 12.5, Weight::SemiBold, Align::Center, LABEL);
+        }
     } else {
         draw_field(g, main, v.focus == Some(Field::Main), main_error, false);
     }
@@ -378,12 +450,15 @@ mod tests {
 
     #[test]
     fn layout_fits_inside_window() {
-        let all = [close_rect(), card_rect(0), card_rect(2), main_field(), name_field(), ok_rect(), cancel_rect()];
+        let all = [close_rect(), card_rect(0), card_rect(3), main_field(), name_field(), ok_rect(), cancel_rect()];
         for r in all {
             assert!(r.x >= 0.0 && r.right() <= WIDTH && r.y >= 0.0 && r.bottom() <= HEIGHT, "{r:?}");
         }
         assert!(cancel_rect().right() < ok_rect().x);
-        assert!(card_rect(2).right() <= WIDTH - PAD + 0.01);
+        assert!(card_rect(3).right() <= WIDTH - PAD + 0.01);
+        assert!(pick_file_button().right() < pick_folder_button().x);
+        assert_eq!(hit(pick_folder_button().center(), Kind::Path, false), Some(Target::PickFolder));
+        assert_eq!(hit(pick_file_button().center(), Kind::Path, false), Some(Target::PickFile));
         let e = edit_rect(name_field());
         assert!(e.y > name_field().y && e.bottom() < name_field().bottom());
     }
@@ -406,6 +481,7 @@ mod tests {
                     pressed: None,
                     focus: Some(Field::Main),
                     app_name: None,
+                    path: None,
                     error: None,
                 },
             ),
@@ -419,6 +495,7 @@ mod tests {
                     pressed: None,
                     focus: None,
                     app_name: None,
+                    path: None,
                     error: Some(("앱을 고르세요.", Field::Main)),
                 },
             ),
@@ -432,10 +509,25 @@ mod tests {
                     pressed: None,
                     focus: Some(Field::Name),
                     app_name: None,
+                    path: None,
                     error: None,
                 },
             ),
         ];
+        let views = views.into_iter().chain([(
+            "dialog-path",
+            FormView {
+                kind: Kind::Path,
+                fixed: false,
+                title: "항목 추가",
+                hover: Some(Target::PickFolder),
+                pressed: None,
+                focus: None,
+                app_name: None,
+                path: Some(r"C:\Users\ssenu\Documents\회의록\2026-10 주간 보고.hwpx"),
+                error: None,
+            },
+        )]);
         for (name, view) in views {
             let gfx = Gfx::offscreen((WIDTH * 2.0) as u32, (HEIGHT * 2.0) as u32, 2.0).unwrap();
             gfx.begin();

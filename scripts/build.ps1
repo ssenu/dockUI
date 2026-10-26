@@ -19,7 +19,7 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "잘못된 버전 형식: $Ver
 if ($Version -ne $current) {
     throw "Cargo.toml 버전($current)과 -Version($Version)이 다릅니다. Cargo.toml을 먼저 고치세요."
 }
-Write-Host "Building YT Launcher $Version"
+Write-Host "Building Dock UI $Version"
 
 # 태그로 버전을 바꾸면 Cargo.lock의 자기 버전 줄도 바뀌므로 --locked는 쓰지 않는다
 cargo build --release

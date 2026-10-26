@@ -231,6 +231,7 @@ pub fn run_fetch_process(args: &[String]) -> i32 {
         let dest = icon_path(dir, item.id());
         saved |= match &item {
             Item::App { target, .. } => save_app_icon(target, &dest),
+            Item::Path { path, .. } => save_item_icon(path, &dest, ICON_PX as i32),
             Item::Web { url, .. } => save_favicon(&http, url, &dest),
             Item::Youtube { .. } => false,
         };
