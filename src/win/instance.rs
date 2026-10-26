@@ -2,7 +2,7 @@
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LPARAM, WPARAM};
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_APP};
+use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow, FindWindowW, PostMessageW, WM_APP};
 use windows::core::HSTRING;
 
 pub const MUTEX_NAME: &str = "YTLauncherMutex";
@@ -26,6 +26,8 @@ pub fn acquire_mutex(name: &str) -> (Option<HANDLE>, bool) {
 
 /// 기존 인스턴스의 숨은 창에 "보이기"를 보낸다. 창을 찾았으면 true.
 pub fn notify_existing() -> bool {
+    // 사용자가 방금 실행한 이쪽 프로세스가 기존 인스턴스에 전면 표시 권한을 넘겨준다
+    let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
     // SAFETY: 클래스 이름으로 찾고 메시지만 보낸다
     match unsafe { FindWindowW(&HSTRING::from(MESSAGE_CLASS), None) } {
         Ok(hwnd) if !hwnd.0.is_null() => unsafe { PostMessageW(Some(hwnd), WM_APP_SHOW, WPARAM(0), LPARAM(0)) }.is_ok(),
