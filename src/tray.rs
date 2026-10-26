@@ -1,40 +1,21 @@
-//! 알림 영역(트레이) 아이콘, 풍선 알림, 팝업 메뉴.
+//! 알림 영역(트레이) 아이콘과 풍선 알림.
 
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, HICON, IMAGE_ICON, LR_DEFAULTCOLOR,
-    LoadImageW, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, SM_CXSMICON, SM_CYSMICON, SetForegroundWindow,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
+    GetSystemMetrics, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, SM_CXSMICON, SM_CYSMICON, WM_APP,
 };
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::PCWSTR;
 
 /// 트레이 아이콘에서 오는 마우스 메시지
 pub const WM_APP_TRAY: u32 = WM_APP + 2;
 const TRAY_ID: u32 = 1;
 /// build.rs가 exe에 넣는 아이콘 리소스 번호
 pub const ICON_RESOURCE_ID: u16 = 1;
-
-pub enum MenuEntry {
-    Item { id: u32, text: String, checked: bool, enabled: bool },
-    Separator,
-}
-
-impl MenuEntry {
-    pub fn item(id: u32, text: impl Into<String>) -> Self {
-        MenuEntry::Item { id, text: text.into(), checked: false, enabled: true }
-    }
-    pub fn checked(id: u32, text: impl Into<String>, checked: bool) -> Self {
-        MenuEntry::Item { id, text: text.into(), checked, enabled: true }
-    }
-    pub fn label(text: impl Into<String>) -> Self {
-        MenuEntry::Item { id: 0, text: text.into(), checked: false, enabled: false }
-    }
-}
 
 fn copy_wide(dst: &mut [u16], text: &str) {
     let mut i = 0;
@@ -106,37 +87,5 @@ impl Tray {
         copy_wide(&mut data.szInfoTitle, title);
         copy_wide(&mut data.szInfo, message);
         let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
-    }
-
-    /// 마우스 위치에 메뉴를 띄우고 고른 항목 id를 돌려준다 (취소하면 0).
-    pub fn show_menu(&self, entries: &[MenuEntry]) -> u32 {
-        // SAFETY: 메뉴는 이 함수 안에서 만들고 없앤다
-        unsafe {
-            let Ok(menu) = CreatePopupMenu() else { return 0 };
-            for entry in entries {
-                match entry {
-                    MenuEntry::Separator => {
-                        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-                    }
-                    MenuEntry::Item { id, text, checked, enabled } => {
-                        let mut flags = MF_STRING;
-                        if *checked {
-                            flags |= MF_CHECKED;
-                        }
-                        if !*enabled {
-                            flags |= MF_GRAYED;
-                        }
-                        let _ = AppendMenuW(menu, flags, *id as usize, &HSTRING::from(text.as_str()));
-                    }
-                }
-            }
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            // 메뉴 바깥을 누르면 닫히도록 먼저 전면으로
-            let _ = SetForegroundWindow(self.hwnd);
-            let chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, None, self.hwnd, None);
-            let _ = DestroyMenu(menu);
-            chosen.0 as u32
-        }
     }
 }

@@ -3,9 +3,10 @@
 use crate::autostart::{AutoStart, RegistryRun};
 use crate::config::{Config, LoadReport, Storage};
 use crate::logging;
-use crate::tray::{MenuEntry, Tray, WM_APP_TRAY};
+use crate::tray::{Tray, WM_APP_TRAY};
 use crate::updater::{self, Release, UreqHttp};
 use crate::win::instance::WM_APP_SHOW;
+use crate::win::menu::{MenuEntry, show_popup};
 use crate::win::msg_window::Handler;
 use crate::win::shell;
 use std::path::PathBuf;
@@ -258,8 +259,7 @@ impl App {
     }
 
     fn show_menu(&mut self) {
-        let Some(tray) = &self.tray else { return };
-        match tray.show_menu(&self.menu_entries()) {
+        match show_popup(self.hwnd, &self.menu_entries()) {
             CMD_AUTOSTART => self.set_autostart(!self.autostart.is_enabled()),
             CMD_CHECK_UPDATE => self.check_updates(true),
             CMD_INSTALL_UPDATE => self.install_update(),
@@ -279,6 +279,8 @@ impl App {
             tray.remove();
         }
         let _ = unsafe { DestroyWindow(self.hwnd) };
+        // 핸들러 안에서 자기 창을 없애면 WM_DESTROY가 핸들러에 오지 않으므로 여기서 루프를 끝낸다
+        unsafe { PostQuitMessage(0) };
     }
 }
 
