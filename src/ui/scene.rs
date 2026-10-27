@@ -1,11 +1,10 @@
 //! 패널·독 한 프레임 그리기: 유리 덧칠, 헤더, 아이콘, ＋, 팔레트 버튼, 말풍선, 테마 선택기, 드래그 중인 아이콘.
 
 use crate::config::DockEdge;
-use crate::config::Theme;
 use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
 use crate::ui::gfx::{Align, Gfx, Weight};
-use crate::ui::layout::{PANEL_HOVER_SCALE, PanelLayout, Pt, RectF, SWATCH};
-use crate::ui::theme::{ACCENT, Color, FALLBACK_ALPHA, PICKER_ORDER, Palette, TOOLTIP_BG, TOOLTIP_TEXT};
+use crate::ui::layout::{PANEL_HOVER_SCALE, PanelLayout, Pt, RectF};
+use crate::ui::theme::{ACCENT, Color, FALLBACK_ALPHA, Palette, TOOLTIP_BG, TOOLTIP_TEXT};
 use std::path::PathBuf;
 
 pub const WINDOW_RADIUS: f32 = 8.0;
@@ -60,14 +59,9 @@ pub struct SceneState<'a> {
     pub hover: &'a [f32],
     pub pressed: Option<usize>,
     pub menu_hover: bool,
-    pub palette_hover: bool,
     pub drag: Option<DragView>,
     /// 말풍선을 띄울 칸 번호
     pub tooltip: Option<usize>,
-    /// 테마 선택기 펼침 정도 0..1 (0이면 닫힘)
-    pub picker: f32,
-    pub picker_hover: Option<usize>,
-    pub theme: Theme,
     /// 끌어 놓을 수 있는 것이 위에 있음 (강조 테두리)
     pub drop_hover: bool,
     /// DIP → 실제 픽셀 배율 (말풍선 픽셀 맞춤)
@@ -193,30 +187,6 @@ fn draw_add(g: &Gfx, r: RectF, p: &Palette) {
     g.line(Pt { x: c.x, y: c.y - arm }, Pt { x: c.x, y: c.y + arm }, p.subtext, width);
 }
 
-/// 그림자 있는 떠 있는 둥근 버튼 바탕 (패널 팔레트 버튼)
-fn draw_round_button(g: &Gfx, c: Pt, radius: f32, p: &Palette, hover: bool) {
-    g.soft_shadow(RectF::new(c.x - radius, c.y - radius, radius * 2.0, radius * 2.0), radius, 0.8);
-    let face = p.tint.with_alpha(1.0).shade(if p.dark_backdrop { 0.10 } else { -0.03 });
-    g.fill_circle(c, radius, if hover { face.shade(0.06) } else { face });
-    g.stroke_circle(c, radius - 0.5, p.divider, 1.0);
-}
-
-/// 원 안에 그린 팔레트: 테두리 + 엄지 구멍 + 물감 네 방울
-fn draw_palette_button(g: &Gfx, r: RectF, p: &Palette, hover: bool) {
-    let c = r.center();
-    let radius = r.w / 2.0;
-    draw_round_button(g, c, radius, p, hover);
-    let body = radius * 0.54;
-    g.stroke_circle(c, body, p.text, 1.6);
-    g.stroke_circle(Pt { x: c.x + body * 0.42, y: c.y + body * 0.42 }, body * 0.2, p.text, 1.4);
-    const PAINTS: [u32; 4] = [0xE53935, 0xFBC02D, 0x43A047, 0x1E88E5];
-    for (k, rgb) in PAINTS.iter().enumerate() {
-        let a = (110.0 + 55.0 * k as f32).to_radians();
-        let at = Pt { x: c.x + body * 0.55 * a.cos(), y: c.y + body * 0.55 * a.sin() };
-        g.fill_circle(at, body * 0.17, Color::hex(*rgb, 1.0));
-    }
-}
-
 fn draw_header(g: &Gfx, s: &SceneState) {
     let h = s.layout.header;
     let p = &s.palette;
@@ -281,63 +251,6 @@ fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limi
     draw_tooltip_box(g, text, r, 1.0, scale);
 }
 
-/// 원(중심 c, 반지름 r)에서 `dir` 방향으로 떨어진 곳에 말풍선을 띄운다 (이웃 원을 가리지 않게).
-fn draw_tooltip_toward(g: &Gfx, text: &str, c: Pt, r: f32, dir: (f32, f32), bounds: (f32, f32), scale: f32) {
-    let w = g.measure(text, 12.0, Weight::SemiBold) + 20.0;
-    let h = 26.0;
-    // 상자 가운데에서 dir 방향으로 상자 테두리까지 거리
-    let half = match (dir.0.abs() > 1e-3, dir.1.abs() > 1e-3) {
-        (true, true) => (w / 2.0 / dir.0.abs()).min(h / 2.0 / dir.1.abs()),
-        (true, false) => w / 2.0,
-        _ => h / 2.0,
-    };
-    let d = r + 8.0 + half;
-    let x = (c.x + dir.0 * d - w / 2.0).clamp(4.0, (bounds.0 - w - 4.0).max(4.0));
-    let y = (c.y + dir.1 * d - h / 2.0).clamp(4.0, (bounds.1 - h - 4.0).max(4.0));
-    let rect = RectF::new(x, y, w, h);
-    draw_tooltip_box(g, text, rect, 1.0, scale);
-}
-
-/// 테마 색 원들 (패널·독 공용). `progress`는 펼침 정도 0..1, `tip_dirs`는 원마다 말풍선을 띄울 방향.
-fn draw_swatches(g: &Gfx, centers: &[Pt], tip_dirs: &[(f32, f32)], s: &SceneState) {
-    let (progress, current, hover) = (s.picker, s.theme, s.picker_hover);
-    let bounds = (s.layout.width, s.layout.height);
-    let base = SWATCH / 2.0 * (0.6 + 0.4 * progress);
-    let hover = hover.filter(|_| progress >= 1.0);
-    for (i, (theme, c)) in PICKER_ORDER.iter().zip(centers.iter()).enumerate() {
-        let radius = if hover == Some(i) { base * 1.08 } else { base };
-        let swatch = crate::ui::theme::palette(*theme);
-        g.soft_shadow(RectF::new(c.x - radius, c.y - radius, radius * 2.0, radius * 2.0), radius, 0.7);
-        g.fill_circle(*c, radius, swatch.swatch);
-        // 밝은 원도 배경과 구분되게 안쪽에 옅은 테두리
-        let rim = if swatch.dark_backdrop { Color::hex(0xFFFFFF, 0.28) } else { Color::hex(0x000000, 0.14) };
-        g.stroke_circle(*c, radius - 0.5, rim, 1.0);
-        if *theme == current {
-            g.stroke_circle(*c, radius + 3.5, ACCENT, 2.0);
-        }
-    }
-    if let Some(i) = hover
-        && let (Some(theme), Some(c), Some(dir)) = (PICKER_ORDER.get(i), centers.get(i), tip_dirs.get(i))
-    {
-        draw_tooltip_toward(g, crate::ui::theme::label(*theme), *c, base * 1.08 + 3.5, *dir, bounds, s.px_scale);
-    }
-}
-
-fn draw_picker(g: &Gfx, s: &SceneState) {
-    let centers = s.layout.swatch_centers(PICKER_ORDER.len(), s.picker);
-    let anchor = s.layout.palette_button.center();
-    // 부채꼴 바깥쪽(팔레트 버튼에서 멀어지는 쪽)
-    let dirs: Vec<(f32, f32)> = centers
-        .iter()
-        .map(|c| {
-            let (dx, dy) = (c.x - anchor.x, c.y - anchor.y);
-            let len = (dx * dx + dy * dy).sqrt().max(1e-3);
-            (dx / len, dy / len)
-        })
-        .collect();
-    draw_swatches(g, &centers, &dirs, s);
-}
-
 /// 끌어 놓기 강조: 판 테두리를 강조색으로, 안쪽은 옅게
 fn draw_drop_highlight(g: &Gfx, r: RectF) {
     g.fill_round_rect(r, WINDOW_RADIUS, ACCENT.with_alpha(0.10));
@@ -382,11 +295,6 @@ pub fn draw(g: &Gfx, s: &SceneState) {
     let add_slot = s.tiles.len();
     let add_level = s.hover.get(add_slot).copied().unwrap_or(0.0);
     draw_add(g, s.layout.add_cell().scaled(1.0 + (PANEL_HOVER_SCALE - 1.0) * add_level), p);
-    draw_palette_button(g, s.layout.palette_button, p, s.palette_hover);
-
-    if s.picker > 0.0 {
-        draw_picker(g, s);
-    }
     if let Some(d) = &s.drag {
         let cell = s.layout.cells[0];
         let r = RectF::new(d.pos.x - cell.w / 2.0, d.pos.y - cell.h / 2.0, cell.w, cell.h).scaled(1.1);
@@ -558,6 +466,7 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Theme;
 
     #[test]
     fn snap_aligns_rect_to_device_pixels() {
@@ -692,7 +601,7 @@ mod tests {
             ..Default::default()
         });
         let layout = PanelLayout::compute(360.0, 480.0, tiles.len());
-        for (i, theme) in PICKER_ORDER.iter().enumerate() {
+        for theme in crate::ui::theme::PICKER_ORDER.iter() {
             let gfx = Gfx::offscreen(360 * 2, 480 * 2, 2.0).unwrap();
             let mut hover = vec![0.0; tiles.len() + 1];
             hover[1] = 1.0;
@@ -704,12 +613,8 @@ mod tests {
                 hover: &hover,
                 pressed: None,
                 menu_hover: false,
-                palette_hover: false,
                 drag: None,
                 tooltip: Some(1),
-                picker: if i == 0 { 1.0 } else { 0.0 },
-                picker_hover: if i == 0 { Some(2) } else { None },
-                theme: *theme,
                 drop_hover: *theme == Theme::Glass,
                 px_scale: 2.0,
             };

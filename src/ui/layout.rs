@@ -45,10 +45,7 @@ pub const GAP: f32 = 16.0;
 pub const MAX_GAP: f32 = 28.0;
 pub const EDGE: f32 = 6.0;
 pub const MENU_BUTTON: f32 = 28.0;
-pub const PALETTE_BUTTON: f32 = 40.0;
 pub const PANEL_HOVER_SCALE: f32 = 1.08;
-pub const PICKER_RADIUS: f32 = 84.0;
-pub const SWATCH: f32 = 34.0;
 pub const MIN_W: f32 = 240.0;
 pub const MIN_H: f32 = 200.0;
 pub const DEFAULT_W: f32 = 360.0;
@@ -60,7 +57,6 @@ pub enum Hit {
     /// 항목 칸 (0부터, ＋ 칸 제외)
     Tile(usize),
     Add,
-    Palette,
     Menu,
     /// 헤더 빈 곳 (드래그하면 창 이동)
     Header,
@@ -84,7 +80,6 @@ pub struct PanelLayout {
     pub height: f32,
     pub header: RectF,
     pub menu_button: RectF,
-    pub palette_button: RectF,
     /// 항목 칸들, 마지막은 ＋ 칸
     pub cells: Vec<RectF>,
 }
@@ -97,12 +92,6 @@ impl PanelLayout {
             header.y + (HEADER_H - MENU_BUTTON) / 2.0,
             MENU_BUTTON,
             MENU_BUTTON,
-        );
-        let palette_button = RectF::new(
-            width - PADDING - PALETTE_BUTTON,
-            height - PADDING - PALETTE_BUTTON,
-            PALETTE_BUTTON,
-            PALETTE_BUTTON,
         );
         let top = header.bottom() + 14.0;
         let inner = width - 2.0 * PADDING;
@@ -121,7 +110,7 @@ impl PanelLayout {
                 RectF::new(left + col as f32 * (ICON + gap), top + row as f32 * (ICON + gap), ICON, ICON)
             })
             .collect();
-        PanelLayout { width, height, header, menu_button, palette_button, cells }
+        PanelLayout { width, height, header, menu_button, cells }
     }
 
     pub fn tile_count(&self) -> usize {
@@ -158,9 +147,6 @@ impl PanelLayout {
         if self.menu_button.contains(p) {
             return Hit::Menu;
         }
-        if self.palette_button.contains(p) {
-            return Hit::Palette;
-        }
         if let Some(i) = self.cells.iter().position(|c| c.contains(p)) {
             return if i == self.tile_count() { Hit::Add } else { Hit::Tile(i) };
         }
@@ -184,24 +170,6 @@ impl PanelLayout {
             })
             .unwrap_or(0)
     }
-
-    /// 테마 선택 원의 중심: 팔레트 버튼을 중심으로 위쪽(-90°)부터 왼쪽(-180°)까지 부채꼴.
-    pub fn swatch_centers(&self, count: usize, progress: f32) -> Vec<Pt> {
-        fan_points(self.palette_button.center(), (-90.0, -180.0), count, PICKER_RADIUS * progress)
-    }
-}
-
-/// `anchor`를 중심으로 반지름 `radius`인 원호 위에 `count`개 점을 각도 범위(도)에 고르게 놓는다.
-/// Qt·Win32 좌표처럼 y가 아래로 커지므로 -90°가 위쪽이다.
-pub fn fan_points(anchor: Pt, angles: (f32, f32), count: usize, radius: f32) -> Vec<Pt> {
-    let (start, end) = angles;
-    let step = if count > 1 { (end - start) / (count - 1) as f32 } else { 0.0 };
-    (0..count)
-        .map(|i| {
-            let a = (start + step * i as f32).to_radians();
-            Pt { x: anchor.x + radius * a.cos(), y: anchor.y + radius * a.sin() }
-        })
-        .collect()
 }
 
 fn dist2(a: Pt, b: Pt) -> f32 {
@@ -268,7 +236,6 @@ mod tests {
         assert_eq!(l.hit_test(l.cells[1].center(), false), Hit::Tile(1));
         assert_eq!(l.hit_test(l.cells[2].center(), false), Hit::Add);
         assert_eq!(l.hit_test(l.menu_button.center(), false), Hit::Menu);
-        assert_eq!(l.hit_test(l.palette_button.center(), false), Hit::Palette);
         assert_eq!(l.hit_test(Pt { x: 60.0, y: 25.0 }, false), Hit::Header);
         assert_eq!(l.hit_test(Pt { x: 1.0, y: 1.0 }, false), Hit::Edge(EDGE_LEFT | EDGE_TOP));
         assert_eq!(l.hit_test(Pt { x: 359.0, y: 240.0 }, false), Hit::Edge(EDGE_RIGHT));
@@ -299,17 +266,6 @@ mod tests {
         assert_eq!(reorder(&['a', 'b', 'c'], 2, 0), vec!['c', 'a', 'b']);
         assert_eq!(reorder(&['a', 'b'], 1, 9), vec!['a', 'b']);
         assert_eq!(reorder(&['a'], 5, 0), vec!['a']);
-    }
-
-    #[test]
-    fn swatches_fan_up_and_left_of_palette_button() {
-        let l = PanelLayout::compute(360.0, 480.0, 0);
-        let a = l.palette_button.center();
-        let s = l.swatch_centers(4, 1.0);
-        assert!((s[0].x - a.x).abs() < 0.01 && (s[0].y - (a.y - PICKER_RADIUS)).abs() < 0.01);
-        assert!((s[3].y - a.y).abs() < 0.01 && (s[3].x - (a.x - PICKER_RADIUS)).abs() < 0.01);
-        assert!(s.iter().all(|p| p.x <= a.x + 0.01 && p.y <= a.y + 0.01));
-        assert!(l.swatch_centers(4, 0.0).iter().all(|p| *p == a));
     }
 
     #[test]

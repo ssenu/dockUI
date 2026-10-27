@@ -14,11 +14,11 @@ use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
 use crate::ui::drop::{self, Dropped};
 use crate::ui::gfx::Gfx;
 use crate::ui::layout::{
-    EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, Hit, MIN_H, MIN_W, PanelLayout, Pt, RectF, SWATCH,
-    default_panel_rect, is_visible_on_any, reorder,
+    EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, Hit, MIN_H, MIN_W, PanelLayout, Pt, RectF, default_panel_rect,
+    is_visible_on_any, reorder,
 };
 use crate::ui::scene::{self, DockScene, DragView, SceneState, TileKind, TileView};
-use crate::ui::theme::{self, PICKER_ORDER, Palette};
+use crate::ui::theme::{self, Palette};
 use crate::win::desktop::{self, PxRect};
 use crate::win::dwm;
 use crate::win::menu::{MenuEntry, show_popup};
@@ -57,7 +57,6 @@ const FRAME_MS: u32 = 10;
 const MAX_FRAME_DT: f32 = 50.0;
 const SAVE_DELAY_MS: u32 = 500;
 const DRAG_THRESHOLD: f32 = 6.0;
-const PICKER_MS: f32 = 160.0;
 const FADE_MS: f32 = 200.0;
 /// 독 말풍선이 차지하는 여유 (창 영역 계산용)
 const GLASS_CLASS: &str = "YTLauncherGlass";
@@ -91,7 +90,6 @@ pub enum UiEvent {
     EditRequested(String),
     DeleteRequested(String),
     Reordered(Vec<String>),
-    ThemePicked(Theme),
     /// 패널 모드에서 위치·크기가 바뀜
     GeometryChanged(Rect),
     MenuRequested,
@@ -205,9 +203,6 @@ pub struct Panel {
     theme: Theme,
     fade_from: Palette,
     fade: Tween,
-    picker_open: bool,
-    picker: Tween,
-    picker_hover: Option<usize>,
     locked: bool,
     animating: bool,
     /// 지난 애니메이션 프레임 시각 (경과 시간으로 진행)
@@ -320,9 +315,6 @@ impl Panel {
             theme: spec.theme,
             fade_from: theme::palette(spec.theme),
             fade: Tween::done(),
-            picker_open: false,
-            picker: Tween::done(),
-            picker_hover: None,
             locked: spec.locked,
             animating: false,
             last_frame: Instant::now(),
@@ -616,7 +608,6 @@ impl Panel {
 
     fn draw_frame(&self) -> windows::core::Result<()> {
         let Some(gfx) = &self.gfx else { return Ok(()) };
-        let picker = if self.picker_open { self.picker.progress() } else { 0.0 };
         let pressed = match &self.press {
             Some(Press { hit: Hit::Tile(i), .. }) => Some(*i),
             _ => None,
@@ -639,12 +630,8 @@ impl Panel {
                     hover: &hover,
                     pressed,
                     menu_hover: self.hover_hit == Hit::Menu,
-                    palette_hover: self.hover_hit == Hit::Palette,
                     drag,
                     tooltip,
-                    picker,
-                    picker_hover: self.picker_hover,
-                    theme: self.theme,
                     drop_hover: self.drop_hover,
                     px_scale: self.scale,
                 };
@@ -707,9 +694,6 @@ impl Panel {
             moving |= anim.step(dt);
         }
         moving |= self.fade.advance(dt);
-        if self.picker_open {
-            moving |= self.picker.advance(dt);
-        }
         if self.mode == Mode::Dock {
             moving |= self.dock.amount.step(dt);
             if self.dock.amount.value == 0.0 && self.dock.amount.target == 0.0 {
@@ -786,14 +770,6 @@ impl Panel {
         index.min(self.movable().saturating_sub(1))
     }
 
-    /// 테마 선택기는 패널에만 있다 (독은 트레이 메뉴에서 테마를 고른다)
-    fn swatch_centers(&self) -> Vec<Pt> {
-        match self.mode {
-            Mode::Panel => self.layout.swatch_centers(PICKER_ORDER.len(), self.picker.progress()),
-            Mode::Dock => Vec::new(),
-        }
-    }
-
     fn client_point_from_screen(&self, l: LPARAM) -> Pt {
         let (x, y) = lparam_point(l);
         let mut pt = POINT { x, y };
@@ -812,23 +788,6 @@ impl Panel {
             anim.set(if on { 1.0 } else { 0.0 });
         }
         self.start_animation();
-    }
-
-    fn swatch_at(&self, p: Pt) -> Option<usize> {
-        if !self.picker_open {
-            return None;
-        }
-        let r = SWATCH / 2.0;
-        self.swatch_centers().iter().position(|c| (c.x - p.x).powi(2) + (c.y - p.y).powi(2) <= r * r)
-    }
-
-    fn close_picker(&mut self) {
-        self.picker_open = false;
-        self.picker_hover = None;
-        if self.mode == Mode::Dock {
-            self.update_dock_glass();
-        }
-        self.render();
     }
 
     fn on_mouse_move(&mut self, p: Pt) {
@@ -861,11 +820,6 @@ impl Panel {
             self.render();
             return;
         }
-        let swatch = self.swatch_at(p);
-        if swatch != self.picker_hover {
-            self.picker_hover = swatch;
-            self.render();
-        }
         if self.mode == Mode::Dock {
             if !self.dock.inside {
                 self.dock.inside = true;
@@ -885,7 +839,6 @@ impl Panel {
         self.tracking_leave = false;
         if self.drag.is_none() {
             self.set_hover(Hit::Empty);
-            self.picker_hover = None;
             if self.mode == Mode::Dock {
                 self.dock.inside = false;
                 self.dock.amount.set(0.0);
@@ -912,21 +865,6 @@ impl Panel {
             self.render();
             return;
         }
-        if self.picker_open {
-            if let Some(i) = self.swatch_at(p) {
-                let picked = PICKER_ORDER[i];
-                self.close_picker();
-                if picked != self.theme {
-                    self.emit(UiEvent::ThemePicked(picked));
-                }
-                return;
-            }
-            let on_button = self.hit(p) == Hit::Palette;
-            self.close_picker();
-            if on_button {
-                return;
-            }
-        }
         let hit = self.hit(p);
         if press.map(|pr| pr.hit) != Some(hit) {
             self.render();
@@ -948,14 +886,6 @@ impl Panel {
             }
             Hit::Done => self.set_editing(false),
             Hit::Menu => self.emit(UiEvent::MenuRequested),
-            Hit::Palette => {
-                self.picker_open = true;
-                self.picker = Tween::new(PICKER_MS);
-                if self.mode == Mode::Dock {
-                    self.update_dock_glass();
-                }
-                self.start_animation();
-            }
             _ => {}
         }
         self.render();
@@ -991,7 +921,7 @@ impl Panel {
                 EDGE_TOP => HTTOP,
                 _ => HTBOTTOM,
             },
-            Hit::Header if !self.picker_open => HTCAPTION,
+            Hit::Header => HTCAPTION,
             _ => HTCLIENT,
         };
         LRESULT(code as isize)
@@ -1040,7 +970,6 @@ impl Panel {
                 self.dock.edge = edge;
                 self.dock.pointer = None;
                 self.dock.amount = Anim::at(0.0);
-                self.picker_open = false;
                 self.hover_hit = Hit::Empty;
                 self.place_windows();
                 self.render();

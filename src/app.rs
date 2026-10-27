@@ -602,7 +602,6 @@ impl App {
                 self.config.items = apply_order(&self.config.items, &ids);
                 self.save();
             }
-            UiEvent::ThemePicked(theme) => self.set_theme(theme),
             UiEvent::GeometryChanged(rect) => {
                 self.config.panel_window = Some(rect);
                 self.save();
