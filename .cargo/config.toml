@@ -1,0 +1,4 @@
+# C 런타임(VCRUNTIME140.dll 등)을 exe 안에 정적으로 넣는다.
+# 동적으로 링크하면 Visual C++ 재배포 패키지가 없는 PC에서 "VCRUNTIME140.dll이 없어" 실행되지 않는다.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
