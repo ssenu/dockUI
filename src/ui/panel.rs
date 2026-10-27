@@ -73,6 +73,8 @@ pub enum PanelCmd {
     SetTheme(Theme),
     /// 사용자 지정 테마 값 (테마가 `Custom`이면 바로 보인다: 설정 창 미리보기)
     SetCustomTheme(CustomTheme),
+    /// 패널 아이콘 크기 (DIP)
+    SetPanelIcon(u32),
     SetLocked(bool),
     /// 독 모드 / 패널 모드와 독 위치를 바꾼다
     SetMode(Mode, DockEdge),
@@ -121,6 +123,8 @@ pub struct OpenSpec {
     pub tiles: Vec<TileView>,
     /// 사용자 지정 테마 값
     pub custom_theme: CustomTheme,
+    /// 패널 아이콘 크기 (DIP)
+    pub panel_icon_size: u32,
     /// 독 위치 (가장자리를 따라 0..1, 0.5가 가운데)
     pub dock_offset: f32,
     /// 독 아이콘 크기 (DIP)
@@ -202,6 +206,8 @@ pub struct Panel {
     layout: PanelLayout,
     dock: Dock,
     panel_rect: PxRect,
+    /// 패널 아이콘 크기 (DIP)
+    panel_icon: f32,
     /// 우리가 창을 옮기는 중이면 WM_WINDOWPOSCHANGED를 무시한다
     positioning: bool,
     tiles: Vec<TileView>,
@@ -309,7 +315,12 @@ impl Panel {
             blur_on: true,
             scale: 1.0,
             mode: spec.mode,
-            layout: PanelLayout::compute(spec.panel_rect.2 as f32, spec.panel_rect.3 as f32, n),
+            layout: PanelLayout::compute(
+                spec.panel_rect.2 as f32,
+                spec.panel_rect.3 as f32,
+                n,
+                spec.panel_icon_size as f32,
+            ),
             dock: Dock {
                 layout: DockLayout::compute(spec.edge, n, false),
                 edge: spec.edge,
@@ -324,6 +335,7 @@ impl Panel {
                 inside: false,
             },
             panel_rect: spec.panel_rect,
+            panel_icon: spec.panel_icon_size as f32,
             positioning: false,
             hover: vec![Anim::at(0.0); n + 1],
             tiles: spec.tiles,
@@ -492,7 +504,8 @@ impl Panel {
     fn relayout_panel_to(&mut self, rect: PxRect) {
         let (x, y, w, h) = rect;
         self.panel_rect = (x, y, w, h);
-        self.layout = PanelLayout::compute(w as f32 / self.scale, h as f32 / self.scale, self.tiles.len());
+        self.layout =
+            PanelLayout::compute(w as f32 / self.scale, h as f32 / self.scale, self.tiles.len(), self.panel_icon);
         self.hover.resize(self.tiles.len() + 1, Anim::at(0.0));
         // 콘텐츠 창은 패널보다 좌우로 넓게: 패널보다 긴 이름 말풍선이 패널 밖까지 한 줄로 나가게
         let side = panel_side_px(self.longest_tip(), w as f32 / self.scale, self.scale);
@@ -1086,13 +1099,15 @@ impl Panel {
                     self.hover = vec![Anim::at(0.0); self.tiles.len() + 1];
                     self.hover_hit = Hit::Empty;
                 }
-                self.layout = PanelLayout::compute(self.layout.width, self.layout.height, self.tiles.len());
+                self.layout =
+                    PanelLayout::compute(self.layout.width, self.layout.height, self.tiles.len(), self.panel_icon);
                 match self.mode {
                     Mode::Dock => self.place_windows(),
                     Mode::Panel => {
                         // 항목이 늘어 아래 줄이 가려지면 패널을 그만큼 늘린다
-                        let min =
-                            (PanelLayout::min_height(self.layout.width, self.tiles.len()) * self.scale).ceil() as i32;
+                        let min = (PanelLayout::min_height(self.layout.width, self.tiles.len(), self.panel_icon)
+                            * self.scale)
+                            .ceil() as i32;
                         if self.panel_rect.3 < min {
                             self.panel_rect.3 = min;
                             self.place_windows();
@@ -1112,6 +1127,20 @@ impl Panel {
                     self.apply_backdrop();
                     self.start_animation();
                 }
+            }
+            PanelCmd::SetPanelIcon(size) => {
+                self.panel_icon = size as f32;
+                self.layout =
+                    PanelLayout::compute(self.layout.width, self.layout.height, self.tiles.len(), self.panel_icon);
+                if self.mode == Mode::Panel {
+                    // 아이콘이 커져 아래 줄이 가려지면 패널을 그만큼 늘린다
+                    let min = (PanelLayout::min_height(self.layout.width, self.tiles.len(), self.panel_icon)
+                        * self.scale)
+                        .ceil() as i32;
+                    self.panel_rect.3 = self.panel_rect.3.max(min);
+                    self.place_windows();
+                }
+                self.render();
             }
             PanelCmd::SetCustomTheme(custom) => {
                 if custom != self.custom {
@@ -1275,7 +1304,8 @@ impl Handler for Panel {
                     info.ptMinTrackSize.x = (MIN_W * self.scale) as i32;
                     // 지금 폭에서 모든 아이콘이 보이는 높이 아래로는 줄지 않게
                     let w = self.panel_rect.2 as f32 / self.scale;
-                    info.ptMinTrackSize.y = (PanelLayout::min_height(w, self.tiles.len()) * self.scale).ceil() as i32;
+                    info.ptMinTrackSize.y =
+                        (PanelLayout::min_height(w, self.tiles.len(), self.panel_icon) * self.scale).ceil() as i32;
                 }
             }
             WM_SIZING if self.mode == Mode::Panel => {
@@ -1283,7 +1313,7 @@ impl Handler for Panel {
                 // SAFETY: lparam은 시스템이 넘긴 끌기 중 사각형
                 let r = unsafe { &mut *(lparam.0 as *mut RECT) };
                 let w = (r.right - r.left) as f32 / self.scale;
-                let min = (PanelLayout::min_height(w, self.tiles.len()) * self.scale).ceil() as i32;
+                let min = (PanelLayout::min_height(w, self.tiles.len(), self.panel_icon) * self.scale).ceil() as i32;
                 if r.bottom - r.top < min {
                     if matches!(wparam.0 as u32, WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT) {
                         r.top = r.bottom - min;

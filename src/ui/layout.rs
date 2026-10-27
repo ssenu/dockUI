@@ -39,6 +39,7 @@ impl RectF {
 
 pub const PADDING: f32 = 14.0;
 pub const HEADER_H: f32 = 40.0;
+/// 패널 아이콘 기본 크기 (DIP, 설정 기본값)
 pub const ICON: f32 = 56.0;
 pub const GAP: f32 = 16.0;
 /// 남는 폭을 나눠 가질 때 칸 간격의 상한
@@ -84,8 +85,12 @@ pub struct PanelLayout {
     pub cells: Vec<RectF>,
 }
 
+/// 패널 아이콘 크기 선택지 (DIP): 작게·보통·크게·더 크게
+pub const PANEL_ICON_SIZES: [u32; 4] = [40, 56, 72, 88];
+
 impl PanelLayout {
-    pub fn compute(width: f32, height: f32, items: usize) -> PanelLayout {
+    /// `icon`: 아이콘 칸 크기 (DIP, 기본 `ICON`). 머리글·글자 크기는 그대로다.
+    pub fn compute(width: f32, height: f32, items: usize, icon: f32) -> PanelLayout {
         let header = RectF::new(PADDING, PADDING - 4.0, width - 2.0 * PADDING, HEADER_H);
         let menu_button = RectF::new(
             header.right() - MENU_BUTTON,
@@ -95,29 +100,29 @@ impl PanelLayout {
         );
         let top = header.bottom() + 14.0;
         let inner = width - 2.0 * PADDING;
-        let columns = ((((inner + GAP).max(ICON + GAP)) / (ICON + GAP)).floor() as usize).max(1);
+        let columns = ((((inner + GAP).max(icon + GAP)) / (icon + GAP)).floor() as usize).max(1);
         // 남는 폭은 간격으로 나누고(상한 MAX_GAP), 그래도 남으면 가운데 정렬
         let gap = if columns > 1 {
-            ((inner - columns as f32 * ICON) / (columns - 1) as f32).clamp(GAP, MAX_GAP)
+            ((inner - columns as f32 * icon) / (columns - 1) as f32).clamp(GAP, MAX_GAP)
         } else {
             GAP
         };
-        let grid_w = columns as f32 * ICON + (columns - 1) as f32 * gap;
+        let grid_w = columns as f32 * icon + (columns - 1) as f32 * gap;
         let left = PADDING + ((inner - grid_w) / 2.0).max(0.0);
         let cells = (0..=items)
             .map(|i| {
                 let (row, col) = (i / columns, i % columns);
-                RectF::new(left + col as f32 * (ICON + gap), top + row as f32 * (ICON + gap), ICON, ICON)
+                RectF::new(left + col as f32 * (icon + gap), top + row as f32 * (icon + gap), icon, icon)
             })
             .collect();
         PanelLayout { width, height, header, menu_button, cells }
     }
 
     /// 이 폭에서 모든 아이콘(마우스 오버로 커진 몫 포함)이 보이고 아래 여백이 양옆과 같은 최소 높이
-    pub fn min_height(width: f32, items: usize) -> f32 {
-        let l = PanelLayout::compute(width, MIN_H, items);
+    pub fn min_height(width: f32, items: usize, icon: f32) -> f32 {
+        let l = PanelLayout::compute(width, MIN_H, items, icon);
         let last = l.cells.last().map_or(l.header.bottom(), |c| c.bottom());
-        (last + ICON * (PANEL_HOVER_SCALE - 1.0) / 2.0 + PADDING).max(MIN_H)
+        (last + icon * (PANEL_HOVER_SCALE - 1.0) / 2.0 + PADDING).max(MIN_H)
     }
 
     pub fn tile_count(&self) -> usize {
@@ -223,7 +228,7 @@ mod tests {
 
     #[test]
     fn grid_wraps_by_width_and_add_is_last() {
-        let l = PanelLayout::compute(360.0, 480.0, 5);
+        let l = PanelLayout::compute(360.0, 480.0, 5, ICON);
         // (360 - 28 + 16) / 72 = 4.83 → 4열, 남는 폭으로 간격 28(상한), 좌우 여백 같게
         assert_eq!(l.cells.len(), 6);
         let step = ICON + MAX_GAP;
@@ -232,27 +237,38 @@ mod tests {
         assert_eq!(l.cells[4].y, l.cells[0].y + step);
         assert_eq!(l.cells[4].x, l.cells[0].x);
         assert_eq!(l.add_cell(), l.cells[5]);
-        let narrow = PanelLayout::compute(100.0, 300.0, 2);
+        let narrow = PanelLayout::compute(100.0, 300.0, 2, ICON);
         assert_eq!(narrow.cells[1].x, narrow.cells[0].x);
         assert_eq!(narrow.cells[0].x, (100.0 - ICON) / 2.0);
     }
 
     #[test]
+    fn icon_size_changes_cells_columns_and_min_height() {
+        let small = PanelLayout::compute(360.0, 480.0, 5, 40.0);
+        let big = PanelLayout::compute(360.0, 480.0, 5, 88.0);
+        assert_eq!((small.cells[0].w, big.cells[0].w), (40.0, 88.0));
+        let cols = |l: &PanelLayout| l.cells.iter().filter(|c| (c.y - l.cells[0].y).abs() < 0.01).count();
+        assert!(cols(&small) > cols(&big));
+        assert!(PanelLayout::min_height(360.0, 5, 88.0) > PanelLayout::min_height(360.0, 5, 40.0));
+        assert_eq!(PANEL_ICON_SIZES, [40, 56, 72, 88]);
+    }
+
+    #[test]
     fn min_height_fits_every_icon_with_side_padding_below() {
         // 360 폭 = 4열. 항목 5 + ＋ = 6칸 → 2줄
-        let l = PanelLayout::compute(360.0, 480.0, 5);
-        let h = PanelLayout::min_height(360.0, 5);
+        let l = PanelLayout::compute(360.0, 480.0, 5, ICON);
+        let h = PanelLayout::min_height(360.0, 5, ICON);
         let last = l.cells.last().unwrap();
         let grow = ICON * (PANEL_HOVER_SCALE - 1.0) / 2.0;
         assert!((h - (last.bottom() + grow + PADDING)).abs() < 0.01, "{h}");
         // 폭을 줄여 줄이 늘면 최소 높이도 커진다
-        assert!(PanelLayout::min_height(200.0, 5) > h);
-        assert!(PanelLayout::min_height(360.0, 0) >= MIN_H);
+        assert!(PanelLayout::min_height(200.0, 5, ICON) > h);
+        assert!(PanelLayout::min_height(360.0, 0, ICON) >= MIN_H);
     }
 
     #[test]
     fn hit_test_finds_buttons_tiles_and_edges() {
-        let l = PanelLayout::compute(360.0, 480.0, 2);
+        let l = PanelLayout::compute(360.0, 480.0, 2, ICON);
         assert_eq!(l.hit_test(l.cells[1].center(), false), Hit::Tile(1));
         assert_eq!(l.hit_test(l.cells[2].center(), false), Hit::Add);
         assert_eq!(l.hit_test(l.menu_button.center(), false), Hit::Menu);
@@ -264,7 +280,7 @@ mod tests {
 
     #[test]
     fn locked_disables_move_and_resize() {
-        let l = PanelLayout::compute(360.0, 480.0, 0);
+        let l = PanelLayout::compute(360.0, 480.0, 0, ICON);
         assert_eq!(l.hit_test(Pt { x: 1.0, y: 1.0 }, true), Hit::Empty);
         assert_eq!(l.hit_test(Pt { x: 60.0, y: 25.0 }, true), Hit::Empty);
         assert_eq!(l.hit_test(l.add_cell().center(), true), Hit::Add);
@@ -272,12 +288,12 @@ mod tests {
 
     #[test]
     fn drop_index_picks_nearest_tile_cell() {
-        let l = PanelLayout::compute(360.0, 480.0, 3);
+        let l = PanelLayout::compute(360.0, 480.0, 3, ICON);
         assert_eq!(l.drop_index(l.cells[2].center()), 2);
         assert_eq!(l.drop_index(Pt { x: 0.0, y: 0.0 }), 0);
         // ＋ 칸 위로 끌어도 마지막 항목 자리
         assert_eq!(l.drop_index(l.add_cell().center()), 2);
-        assert_eq!(PanelLayout::compute(360.0, 480.0, 0).drop_index(Pt::default()), 0);
+        assert_eq!(PanelLayout::compute(360.0, 480.0, 0, ICON).drop_index(Pt::default()), 0);
     }
 
     #[test]

@@ -596,7 +596,7 @@ mod tests {
             ..Default::default()
         });
         tiles[1].label = "아침 뉴스 라이브 - 오늘의 주요 소식 모아 보기 (전체 재생목록)".into();
-        let layout = PanelLayout::compute(360.0, 480.0, tiles.len());
+        let layout = PanelLayout::compute(360.0, 480.0, tiles.len(), crate::ui::layout::ICON);
         // 패널보다 긴 말풍선이 패널 밖까지 나가는 모습: 콘텐츠 창을 좌우로 SIDE만큼 넓혀 그린다
         const SIDE: f32 = 60.0;
         for theme in crate::ui::theme::PICKER_ORDER.iter() {
@@ -646,7 +646,28 @@ mod tests {
             kind: TileKind::Youtube,
             ..Default::default()
         }];
-        let layout = PanelLayout::compute(300.0, 220.0, tiles.len());
+        let layout = PanelLayout::compute(300.0, 220.0, tiles.len(), crate::ui::layout::ICON);
+        // 큰 아이콘(72) 패널도 같이
+        {
+            let big = PanelLayout::compute(300.0, 220.0, tiles.len(), 72.0);
+            let gfx = Gfx::offscreen(600, 440, 2.0).unwrap();
+            let hover = vec![0.0; 2];
+            let state = SceneState {
+                layout: &big,
+                palette: crate::ui::theme::palette(crate::config::Theme::Dark),
+                acrylic: true,
+                tiles: &tiles,
+                hover: &hover,
+                pressed: None,
+                menu_hover: false,
+                drag: None,
+                drop_hover: false,
+            };
+            gfx.begin();
+            draw(&gfx, &state);
+            gfx.end().unwrap();
+            gfx.save_png(&dir.join("panel-icon-72.png")).unwrap();
+        }
         for (name, color) in [("light", 0xF4ECD8), ("dark", 0x0F4C5C)] {
             let gfx = Gfx::offscreen(600, 440, 2.0).unwrap();
             let hover = vec![0.0; 2];

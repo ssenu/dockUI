@@ -88,6 +88,8 @@ pub struct Config {
     pub dock_size: u32,
     /// 사용자 지정 테마 값 (테마가 `Custom`일 때 쓴다)
     pub custom_theme: CustomTheme,
+    /// 패널 아이콘 크기 (DIP)
+    pub panel_icon_size: u32,
 }
 
 impl Default for Config {
@@ -107,6 +109,7 @@ impl Default for Config {
             dock_offset: 0.5,
             dock_size: crate::ui::dock_layout::DEFAULT_SIZE,
             custom_theme: CustomTheme::default(),
+            panel_icon_size: crate::ui::layout::ICON as u32,
         }
     }
 }
@@ -241,6 +244,16 @@ pub fn migrate_v1(v1: &Value) -> Option<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panel_icon_size_defaults_and_round_trips() {
+        assert_eq!(Config::default().panel_icon_size, 56);
+        let c = Config { panel_icon_size: 72, ..Config::default() };
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.panel_icon_size, 72);
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.panel_icon_size, 56);
+    }
 
     #[test]
     fn custom_theme_round_trips_and_unknown_theme_falls_back() {

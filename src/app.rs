@@ -11,6 +11,7 @@ use crate::tray::{Tray, WM_APP_TRAY};
 use crate::ui::app_list::AppChoice;
 use crate::ui::dialogs::{Initial, ItemInput, item_dialog};
 use crate::ui::drop::Dropped;
+use crate::ui::layout::PANEL_ICON_SIZES;
 use crate::ui::panel::{OpenSpec, Panel, PanelCmd, PanelHandle, UiEvent, initial_rect};
 use crate::ui::scene::{TileKind, TileView, badge_of};
 use crate::ui::theme::{self, PICKER_ORDER};
@@ -66,6 +67,8 @@ const CMD_ADD: u32 = 23;
 const CMD_THEME: u32 = 40;
 const CMD_THEME_CUSTOM: u32 = 45;
 const CMD_THEME_EDIT: u32 = 46;
+/// 패널 아이콘 크기: CMD_PANEL_ICON + PANEL_ICON_SIZES 번호
+const CMD_PANEL_ICON: u32 = 50;
 const CMD_MODE_DOCK: u32 = 30;
 const CMD_MODE_PANEL: u32 = 31;
 const CMD_DOCK_EDIT: u32 = 36;
@@ -261,7 +264,7 @@ fn theme_entries(current: Theme) -> Vec<MenuEntry> {
 
 /// 모드 부분 메뉴 (순수 함수): 독 모드 아래에는 독 수정 모드만, 패널 모드면 위치 초기화·잠금.
 /// 독 위치는 독 수정 모드에서 판을 끌어 바꾼다.
-fn mode_entries(dock: bool, editing: bool, locked: bool) -> Vec<MenuEntry> {
+fn mode_entries(dock: bool, editing: bool, locked: bool, panel_icon: u32) -> Vec<MenuEntry> {
     let mut entries = vec![
         MenuEntry::checked(CMD_MODE_DOCK, "독 모드", dock),
         MenuEntry::checked(CMD_DOCK_EDIT, "    독 수정 모드 (옮기기·크기·순서)", dock && editing),
@@ -271,6 +274,17 @@ fn mode_entries(dock: bool, editing: bool, locked: bool) -> Vec<MenuEntry> {
         entries.extend([
             MenuEntry::item(CMD_RESET_GEOMETRY, "위치·크기 초기화"),
             MenuEntry::checked(CMD_LOCK, "위치 잠금", locked),
+            MenuEntry::submenu(
+                "아이콘 크기",
+                PANEL_ICON_SIZES
+                    .iter()
+                    .zip(["작게", "보통", "크게", "더 크게"])
+                    .enumerate()
+                    .map(|(i, (size, name))| {
+                        MenuEntry::checked(CMD_PANEL_ICON + i as u32, format!("{name} ({size})"), *size == panel_icon)
+                    })
+                    .collect(),
+            ),
         ]);
     }
     entries
@@ -589,6 +603,7 @@ impl App {
             dock_offset: self.config.dock_offset,
             dock_size: self.config.dock_size,
             custom_theme: self.config.custom_theme,
+            panel_icon_size: self.config.panel_icon_size,
         };
         match Panel::open(spec, notify) {
             Ok(handle) => self.panel = Some(handle),
@@ -884,7 +899,7 @@ impl App {
             MenuEntry::submenu("테마", theme_entries(self.config.theme)),
             MenuEntry::Separator,
         ];
-        entries.extend(mode_entries(dock, self.dock_editing, self.config.locked));
+        entries.extend(mode_entries(dock, self.dock_editing, self.config.locked, self.config.panel_icon_size));
         entries.extend([
             MenuEntry::Separator,
             MenuEntry::checked(CMD_AUTOSTART, "윈도우 시작 시 실행", self.autostart.is_enabled()),
@@ -914,6 +929,12 @@ impl App {
                 self.set_theme(PICKER_ORDER[(id - CMD_THEME) as usize]);
             }
             CMD_THEME_CUSTOM => self.set_theme(Theme::Custom),
+            id if (CMD_PANEL_ICON..CMD_PANEL_ICON + PANEL_ICON_SIZES.len() as u32).contains(&id) => {
+                let size = PANEL_ICON_SIZES[(id - CMD_PANEL_ICON) as usize];
+                self.config.panel_icon_size = size;
+                self.save();
+                self.panel_send(PanelCmd::SetPanelIcon(size));
+            }
             CMD_THEME_EDIT => self.edit_custom_theme(),
             CMD_MODE_DOCK => self.set_mode(Mode::Dock, self.config.dock_edge),
             CMD_MODE_PANEL => self.set_mode(Mode::Panel, self.config.dock_edge),
@@ -1210,8 +1231,27 @@ mod tests {
     }
 
     #[test]
+    fn panel_menu_has_icon_sizes_with_check() {
+        let entries = mode_entries(false, false, false, 72);
+        let sub = entries.iter().find_map(|e| match e {
+            MenuEntry::Submenu { text, entries } if text == "아이콘 크기" => Some(entries),
+            _ => None,
+        });
+        let sub = sub.expect("패널 모드에 아이콘 크기 메뉴");
+        let checked: Vec<&str> = sub
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item { text, checked: true, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checked, vec!["크게 (72)"]);
+        assert!(!mode_entries(true, false, false, 72).iter().any(|e| matches!(e, MenuEntry::Submenu { .. })));
+    }
+
+    #[test]
     fn dock_menu_has_edit_mode_but_no_edge_items() {
-        let texts: Vec<String> = mode_entries(true, false, false)
+        let texts: Vec<String> = mode_entries(true, false, false, 56)
             .into_iter()
             .filter_map(|e| match e {
                 MenuEntry::Item { text, .. } => Some(text),
@@ -1220,7 +1260,7 @@ mod tests {
             .collect();
         assert!(texts.iter().any(|t| t.contains("독 수정 모드")));
         assert!(!texts.iter().any(|t| t.contains("독 위치")), "{texts:?}");
-        let panel = mode_entries(false, false, true);
+        let panel = mode_entries(false, false, true, 56);
         assert!(panel.iter().any(|e| matches!(e, MenuEntry::Item { text, .. } if text.contains("위치 잠금"))));
     }
 
