@@ -14,7 +14,7 @@ use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
 use crate::ui::drop::{self, Dropped};
 use crate::ui::gfx::Gfx;
 use crate::ui::layout::{
-    EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, Hit, MIN_H, MIN_W, PanelLayout, Pt, RectF, default_panel_rect,
+    EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, Hit, MIN_W, PanelLayout, Pt, RectF, default_panel_rect,
     is_visible_on_any, reorder,
 };
 use crate::ui::scene::{self, DockScene, DragView, SceneState, TileKind, TileView};
@@ -43,8 +43,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     KillTimer, LoadCursorW, MA_NOACTIVATE, MINMAXINFO, PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
     SetCursor, SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_TIMER, WM_WINDOWPOSCHANGED, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZING, WM_TIMER, WM_WINDOWPOSCHANGED, WMSZ_TOP,
+    WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 /// 앱 → 화면 명령이 채널에 들어왔음을 알리는 메시지
@@ -944,8 +944,17 @@ impl Panel {
                     self.hover_hit = Hit::Empty;
                 }
                 self.layout = PanelLayout::compute(self.layout.width, self.layout.height, self.tiles.len());
-                if self.mode == Mode::Dock {
-                    self.place_windows();
+                match self.mode {
+                    Mode::Dock => self.place_windows(),
+                    Mode::Panel => {
+                        // 항목이 늘어 아래 줄이 가려지면 패널을 그만큼 늘린다
+                        let min =
+                            (PanelLayout::min_height(self.layout.width, self.tiles.len()) * self.scale).ceil() as i32;
+                        if self.panel_rect.3 < min {
+                            self.panel_rect.3 = min;
+                            self.place_windows();
+                        }
+                    }
                 }
                 self.render();
             }
@@ -1084,8 +1093,25 @@ impl Handler for Panel {
                     // SAFETY: lparam은 시스템이 넘긴 MINMAXINFO
                     let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
                     info.ptMinTrackSize.x = (MIN_W * self.scale) as i32;
-                    info.ptMinTrackSize.y = (MIN_H * self.scale) as i32;
+                    // 지금 폭에서 모든 아이콘이 보이는 높이 아래로는 줄지 않게
+                    let w = self.panel_rect.2 as f32 / self.scale;
+                    info.ptMinTrackSize.y = (PanelLayout::min_height(w, self.tiles.len()) * self.scale).ceil() as i32;
                 }
+            }
+            WM_SIZING if self.mode == Mode::Panel => {
+                // 폭을 줄여 줄이 늘면 최소 높이도 따라 커진다: 끌고 있는 쪽 가장자리를 늘려 맞춘다
+                // SAFETY: lparam은 시스템이 넘긴 끌기 중 사각형
+                let r = unsafe { &mut *(lparam.0 as *mut RECT) };
+                let w = (r.right - r.left) as f32 / self.scale;
+                let min = (PanelLayout::min_height(w, self.tiles.len()) * self.scale).ceil() as i32;
+                if r.bottom - r.top < min {
+                    if matches!(wparam.0 as u32, WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT) {
+                        r.top = r.bottom - min;
+                    } else {
+                        r.bottom = r.top + min;
+                    }
+                }
+                return Some(LRESULT(1));
             }
             WM_TIMER => match wparam.0 {
                 TIMER_ANIM => self.tick(),

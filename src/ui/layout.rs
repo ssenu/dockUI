@@ -113,6 +113,13 @@ impl PanelLayout {
         PanelLayout { width, height, header, menu_button, cells }
     }
 
+    /// 이 폭에서 모든 아이콘(마우스 오버로 커진 몫 포함)이 보이고 아래 여백이 양옆과 같은 최소 높이
+    pub fn min_height(width: f32, items: usize) -> f32 {
+        let l = PanelLayout::compute(width, MIN_H, items);
+        let last = l.cells.last().map_or(l.header.bottom(), |c| c.bottom());
+        (last + ICON * (PANEL_HOVER_SCALE - 1.0) / 2.0 + PADDING).max(MIN_H)
+    }
+
     pub fn tile_count(&self) -> usize {
         self.cells.len() - 1
     }
@@ -228,6 +235,19 @@ mod tests {
         let narrow = PanelLayout::compute(100.0, 300.0, 2);
         assert_eq!(narrow.cells[1].x, narrow.cells[0].x);
         assert_eq!(narrow.cells[0].x, (100.0 - ICON) / 2.0);
+    }
+
+    #[test]
+    fn min_height_fits_every_icon_with_side_padding_below() {
+        // 360 폭 = 4열. 항목 5 + ＋ = 6칸 → 2줄
+        let l = PanelLayout::compute(360.0, 480.0, 5);
+        let h = PanelLayout::min_height(360.0, 5);
+        let last = l.cells.last().unwrap();
+        let grow = ICON * (PANEL_HOVER_SCALE - 1.0) / 2.0;
+        assert!((h - (last.bottom() + grow + PADDING)).abs() < 0.01, "{h}");
+        // 폭을 줄여 줄이 늘면 최소 높이도 커진다
+        assert!(PanelLayout::min_height(200.0, 5) > h);
+        assert!(PanelLayout::min_height(360.0, 0) >= MIN_H);
     }
 
     #[test]
