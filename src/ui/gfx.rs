@@ -196,6 +196,11 @@ type FormatKey = (u32, Weight, Align, bool);
 /// 너비 캐시가 이보다 커지면 비운다 (항목 이름·버전 정도라 보통 수십 개)
 const WIDTH_CACHE_MAX: usize = 512;
 
+/// 그리기 버퍼 크기: 256px 단위로 올려 잡아 창 크기가 조금씩 바뀔 때마다 버퍼를 다시 만들지 않는다
+pub fn buffer_size(px: u32) -> u32 {
+    px.max(1).div_ceil(256) * 256
+}
+
 fn text_resources() -> Result<(IDWriteFactory5, Option<IDWriteFontCollection1>)> {
     let dwrite: IDWriteFactory5 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
     let fonts = load_fonts(&dwrite).ok();
@@ -232,7 +237,7 @@ impl Gfx {
 
     /// `hwnd`는 `WS_EX_NOREDIRECTIONBITMAP`으로 만든 창이어야 한다.
     pub fn new(hwnd: HWND, width: u32, height: u32, scale: f32) -> Result<Gfx> {
-        let (width, height) = (width.max(1), height.max(1));
+        let (width, height) = (buffer_size(width), buffer_size(height));
         // SAFETY: 아래는 모두 COM 객체 생성 순서대로의 표준 호출
         unsafe {
             let d3d = create_d3d_device()?;
@@ -294,9 +299,10 @@ impl Gfx {
         Ok(())
     }
 
-    /// 창 크기(실제 픽셀)나 DPI가 바뀌면 호출한다.
+    /// 창 크기(실제 픽셀)나 DPI가 바뀌면 호출한다. 버퍼는 256px 단위로 잡아 조금씩 바뀔 때는 다시 만들지 않는다
+    /// (창보다 큰 부분은 창 경계에서 잘린다).
     pub fn resize(&mut self, width: u32, height: u32, scale: f32) -> Result<()> {
-        let (width, height) = (width.max(1), height.max(1));
+        let (width, height) = (buffer_size(width), buffer_size(height));
         if (width, height, scale) == (self.width, self.height, self.scale) {
             return Ok(());
         }
@@ -687,5 +693,18 @@ mod offscreen {
                 encoder.Commit()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::buffer_size;
+
+    #[test]
+    fn buffer_grows_in_256px_steps() {
+        assert_eq!(buffer_size(1), 256);
+        assert_eq!(buffer_size(256), 256);
+        assert_eq!(buffer_size(257), 512);
+        assert_eq!(buffer_size(1000), 1024);
     }
 }

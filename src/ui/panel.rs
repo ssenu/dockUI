@@ -17,7 +17,7 @@ use crate::ui::layout::{
     EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, Hit, MIN_W, PanelLayout, Pt, RectF, default_panel_rect,
     is_visible_on_any, reorder,
 };
-use crate::ui::scene::{self, DockScene, DragView, SceneState, TileKind, TileView};
+use crate::ui::scene::{self, DockScene, DragView, SceneState, TileKind, TileView, WINDOW_RADIUS};
 use crate::ui::theme::{self, Palette};
 use crate::win::desktop::{self, PxRect};
 use crate::win::dwm;
@@ -28,8 +28,8 @@ use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BLACK_BRUSH, BeginPaint, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, FillRect, GetStockObject, HBRUSH,
-    HGDIOBJ, HRGN, PAINTSTRUCT, RGN_OR, ScreenToClient, SetWindowRgn,
+    BLACK_BRUSH, BeginPaint, CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EndPaint, FillRect,
+    GetStockObject, HBRUSH, HGDIOBJ, HRGN, PAINTSTRUCT, RGN_OR, ScreenToClient, SetWindowRgn,
 };
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -40,11 +40,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, HTBOTTOM, HTBOTTOMLEFT,
     HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HTTRANSPARENT, IDC_SIZEALL,
-    KillTimer, LoadCursorW, MA_NOACTIVATE, MINMAXINFO, PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetCursor, SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZING, WM_TIMER, WM_WINDOWPOSCHANGED, WMSZ_TOP,
-    WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+    KillTimer, LoadCursorW, MA_NOACTIVATE, MINMAXINFO, PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WINDOWPOS, WM_ACTIVATE,
+    WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZING,
+    WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 /// 앱 → 화면 명령이 채널에 들어왔음을 알리는 메시지
@@ -209,6 +210,8 @@ pub struct Panel {
     last_frame: Instant,
     /// 마지막으로 놓은 유리 창·창 영역 (같으면 다시 하지 않는다)
     last_glass: Option<PxRect>,
+    /// 독 흐림(유리) 창의 화면 사각형 (가장 커졌을 때 판 크기로 고정)
+    glass_px: PxRect,
     last_region: Vec<PxRect>,
     /// 패널 콘텐츠 창이 패널 좌우로 더 차지하는 폭 (px, 긴 말풍선용)
     panel_side: i32,
@@ -326,6 +329,7 @@ impl Panel {
             animating: false,
             last_frame: Instant::now(),
             last_glass: None,
+            glass_px: (0, 0, 0, 0),
             last_region: Vec::new(),
             panel_side: 0,
             tip: Anim::at(0.0),
@@ -414,6 +418,8 @@ impl Panel {
         self.positioning = true;
         match self.mode {
             Mode::Panel => {
+                // 독에서 걸어 둔 흐림 모양을 풀고 패널 크기로
+                let _ = unsafe { SetWindowRgn(self.glass, None, true) };
                 move_window(self.glass, self.panel_rect);
                 self.relayout_panel();
             }
@@ -423,7 +429,13 @@ impl Panel {
     }
 
     fn relayout_panel(&mut self) {
-        let (x, y, w, h) = screen_rect(self.glass);
+        let rect = screen_rect(self.glass);
+        self.relayout_panel_to(rect);
+    }
+
+    /// 패널이 `rect`(화면 px)에 있다고 보고 레이아웃·콘텐츠 창·그리기 버퍼를 맞춘다
+    fn relayout_panel_to(&mut self, rect: PxRect) {
+        let (x, y, w, h) = rect;
         self.panel_rect = (x, y, w, h);
         self.layout = PanelLayout::compute(w as f32 / self.scale, h as f32 / self.scale, self.tiles.len());
         self.hover.resize(self.tiles.len() + 1, Anim::at(0.0));
@@ -505,14 +517,16 @@ impl Panel {
         let widest = px(d.layout.max_length());
         d.center_px =
             dock_layout::bar_center(work, d.edge, widest, thick, px(dock_layout::edge_margin(d.edge)), d.offset);
-        d.content_px = dock_layout::content_rect(
-            dock_layout::rect_around(d.center_px, d.edge, widest, thick),
-            d.edge,
-            px(d.layout.headroom(tip)),
-            px(d.layout.side_room(tip)),
-        );
+        let widest_rect = dock_layout::rect_around(d.center_px, d.edge, widest, thick);
+        d.content_px =
+            dock_layout::content_rect(widest_rect, d.edge, px(d.layout.headroom(tip)), px(d.layout.side_room(tip)));
         let content = d.content_px;
         move_window(self.content, content);
+        // 흐림(유리) 창은 가장 커졌을 때 판 크기로 한 번만 놓고, 확대 중에는 흐림 모양만 바꾼다
+        self.glass_px = widest_rect;
+        self.positioning = true;
+        move_window(self.glass, widest_rect);
+        self.positioning = false;
         self.resize_gfx(content.2, content.3);
         self.update_dock_glass();
     }
@@ -539,13 +553,19 @@ impl Panel {
             let y = (r.y * s).round() as i32;
             (x, y, (r.right() * s).round() as i32 - x, (r.bottom() * s).round() as i32 - y)
         };
+        // 흐림 창을 매 프레임 옮기거나 크기를 바꾸지 않고(창 이동·다시 칠하기가 끊김의 원인),
+        // 흐림이 보이는 모양만 지금 판(둥근 사각형)으로 바꾼다. 모양이 같으면 건너뛴다.
         let local = px(bar);
-        let glass = (cx + local.0, cy + local.1, local.2, local.3);
-        if self.last_glass != Some(glass) {
-            self.last_glass = Some(glass);
-            self.positioning = true;
-            move_window(self.glass, glass);
-            self.positioning = false;
+        let (gx, gy, _, _) = self.glass_px;
+        let shape = (cx + local.0 - gx, cy + local.1 - gy, local.2, local.3);
+        if self.last_glass != Some(shape) {
+            self.last_glass = Some(shape);
+            let d = (WINDOW_RADIUS * 2.0 * s).round() as i32;
+            // SAFETY: 새 영역을 만들어 넘긴다 (영역은 SetWindowRgn이 가진다)
+            unsafe {
+                let rgn = CreateRoundRectRgn(shape.0, shape.1, shape.0 + shape.2 + 1, shape.1 + shape.3 + 1, d, d);
+                let _ = SetWindowRgn(self.glass, Some(rgn), false);
+            }
         }
 
         // 창 영역은 두 상태로만 바꾼다: 쉼(판 + 수정 안내) / 활성(콘텐츠 창 전체).
@@ -1128,10 +1148,32 @@ impl Handler for Panel {
                 }
                 return None;
             }
+            WM_WINDOWPOSCHANGING => {
+                // 패널을 끌어 옮기거나 크기를 바꿀 때, 유리 창이 움직이기 직전에 콘텐츠 창도 같은 자리로 옮기고
+                // 다시 그린다 (움직인 뒤에 따라가면 내용이 테두리보다 한 박자 늦는다)
+                if !self.positioning && self.mode == Mode::Panel {
+                    // SAFETY: lparam은 시스템이 넘긴 WINDOWPOS
+                    let wp = unsafe { &*(lparam.0 as *const WINDOWPOS) };
+                    let (mut x, mut y, mut w, mut h) = self.panel_rect;
+                    if !wp.flags.contains(SWP_NOMOVE) {
+                        (x, y) = (wp.x, wp.y);
+                    }
+                    if !wp.flags.contains(SWP_NOSIZE) {
+                        (w, h) = (wp.cx, wp.cy);
+                    }
+                    if (x, y, w, h) != self.panel_rect {
+                        self.relayout_panel_to((x, y, w, h));
+                        self.render();
+                    }
+                }
+                return None;
+            }
             WM_WINDOWPOSCHANGED => {
                 if !self.positioning && self.mode == Mode::Panel {
-                    self.relayout_panel();
-                    self.render();
+                    if screen_rect(hwnd) != self.panel_rect {
+                        self.relayout_panel();
+                        self.render();
+                    }
                     unsafe { SetTimer(Some(hwnd), TIMER_SAVE_GEOMETRY, SAVE_DELAY_MS, None) };
                 }
                 return None;
