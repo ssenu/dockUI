@@ -434,7 +434,18 @@ impl Panel {
         self.resize_gfx(w, h);
     }
 
+    /// 지금 항목들 중 가장 긴 말풍선 폭 (DIP, 작업 영역 폭을 넘지 않게)
+    fn longest_tip(&self) -> f32 {
+        let cap = desktop::primary_work_area().2 as f32 / self.scale;
+        let Some(gfx) = &self.gfx else { return 200.0 };
+        let mut labels: Vec<&str> = self.tiles.iter().map(|t| t.label.as_str()).collect();
+        labels.push("항목 추가");
+        scene::longest_tip(gfx, &labels, cap)
+    }
+
     fn place_dock(&mut self) {
+        // 독 그리기 배율로 잰 폭이 아니라 DIP 폭을 쓰므로 배율로 나눠 맞춘다
+        let tip = self.longest_tip() / dock_layout::zoom_for(self.dock.size);
         let s = self.dock_scale();
         let d = &mut self.dock;
         d.layout = DockLayout::compute(d.edge, self.tiles.len(), d.editing);
@@ -447,8 +458,8 @@ impl Panel {
         d.content_px = dock_layout::content_rect(
             dock_layout::rect_around(d.center_px, d.edge, widest, thick),
             d.edge,
-            px(d.layout.headroom()),
-            px(d.layout.side_room()),
+            px(d.layout.headroom(tip)),
+            px(d.layout.side_room(tip)),
         );
         let content = d.content_px;
         move_window(self.content, content);

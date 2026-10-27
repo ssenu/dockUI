@@ -15,10 +15,10 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
     D2D1_BITMAP_PROPERTIES1, D2D1_BRUSH_PROPERTIES, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_OPTIONS,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1,
-    ID2D1DeviceContext, ID2D1Factory1, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
+    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1RenderTarget,
+    ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -554,43 +554,6 @@ impl Gfx {
                 &rect(r),
                 &brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            )
-        };
-    }
-
-    fn block_format(&self, size: f32, weight: Weight, align: Align) -> Option<IDWriteTextFormat> {
-        self.format(size, weight, align, true)
-    }
-
-    /// 너비 `max_w` 안에서 줄바꿈한 글자 덩어리의 (가장 긴 줄 너비, 전체 높이)
-    pub fn measure_block(&self, text: &str, size: f32, weight: Weight, max_w: f32) -> (f32, f32) {
-        let Some(format) = self.block_format(size, weight, Align::Leading) else { return (0.0, 0.0) };
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        // SAFETY: 측정용 레이아웃을 만들어 크기만 읽는다
-        unsafe {
-            let Ok(layout) = self.dwrite.CreateTextLayout(&wide, &format, max_w.max(1.0), 10_000.0) else {
-                return (0.0, 0.0);
-            };
-            let mut metrics = DWRITE_TEXT_METRICS::default();
-            match layout.GetMetrics(&mut metrics) {
-                Ok(()) => (metrics.width, metrics.height),
-                Err(_) => (0.0, 0.0),
-            }
-        }
-    }
-
-    /// 사각형 안에 줄바꿈한 글자 덩어리 (세로 가운데, 자르지 않음)
-    pub fn text_block(&self, text: &str, r: RectF, size: f32, weight: Weight, align: Align, c: Color) {
-        let (Some(format), Some(brush)) = (self.block_format(size, weight, align), self.brush(c)) else { return };
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            self.ctx.DrawText(
-                &wide,
-                &format,
-                &rect(r),
-                &brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             )
         };

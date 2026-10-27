@@ -19,10 +19,6 @@ pub const MAGNIFY: f32 = 0.3;
 pub const RANGE: f32 = 1.5 * (ICON + GAP);
 /// 콘텐츠 창이 판 바깥(화면 안쪽)으로 더 차지하는 여유: 확대 + 여러 줄 말풍선
 pub const HEADROOM: f32 = 140.0;
-/// 말풍선 최대 너비 (넘치면 줄을 바꿔 이름을 끝까지 보여 준다)
-pub const TOOLTIP_MAX_W: f32 = 360.0;
-/// 세로 독은 말풍선이 옆으로 나가므로 가장 커진 아이콘 + 말풍선 최대 너비만큼 여유를 둔다
-pub const SIDE_HEADROOM: f32 = ICON * (1.0 + MAGNIFY) - ICON + 8.0 + TOOLTIP_MAX_W + 8.0;
 /// 콘텐츠 창이 판 양 끝으로 더 차지하는 여유 (확대로 늘어나는 길이 + 선택기)
 pub const SIDE_ROOM: f32 = 90.0;
 /// 독 아이콘 크기(설정값, DIP): 기본·최소·최대·한 단계
@@ -106,14 +102,14 @@ impl DockLayout {
         self.editing.then_some(self.tiles.max(1))
     }
 
-    /// 콘텐츠 창이 판 양 끝으로 더 차지하는 여유: 항목이 적어 판이 짧아도 가장 넓은 말풍선이 들어가게
-    pub fn side_room(&self) -> f32 {
-        if is_vertical(self.edge) { SIDE_ROOM } else { SIDE_ROOM.max((TOOLTIP_MAX_W + 16.0 - self.max_length()) / 2.0) }
+    /// 콘텐츠 창이 판 양 끝으로 더 차지하는 여유: 판이 짧아도 가장 긴 말풍선(`longest_tip`, DIP)이 들어가게
+    pub fn side_room(&self, longest_tip: f32) -> f32 {
+        if is_vertical(self.edge) { SIDE_ROOM } else { SIDE_ROOM.max((longest_tip + 16.0 - self.max_length()) / 2.0) }
     }
 
-    /// 콘텐츠 창이 화면 안쪽으로 차지하는 여유 (세로 독은 말풍선 너비만큼 더)
-    pub fn headroom(&self) -> f32 {
-        if is_vertical(self.edge) { SIDE_HEADROOM.max(HEADROOM) } else { HEADROOM }
+    /// 콘텐츠 창이 화면 안쪽으로 차지하는 여유 (세로 독은 가장 커진 아이콘 + 가장 긴 말풍선)
+    pub fn headroom(&self, longest_tip: f32) -> f32 {
+        if is_vertical(self.edge) { HEADROOM.max(ICON * MAGNIFY + 8.0 + longest_tip + 8.0) } else { HEADROOM }
     }
 
     /// `pointer`: 마우스 위치(판 중심 기준 along, 확대 전 좌표). `amount`: 확대 정도 0..1 (애니메이션).
@@ -298,14 +294,14 @@ mod tests {
     }
 
     #[test]
-    fn vertical_dock_has_room_for_wide_tooltips() {
-        let side = DockLayout::compute(DockEdge::Left, 3, false);
-        // 콘텐츠 창 폭(판 + 여유) 안에 가장 커진 아이콘 + 간격 + 가장 긴 말풍선이 들어간다
-        assert!(THICK + side.headroom() >= PAD + ICON * (1.0 + MAGNIFY) + 8.0 + TOOLTIP_MAX_W + 4.0);
-        assert_eq!(DockLayout::compute(DockEdge::Bottom, 3, false).headroom(), HEADROOM);
-        // 가로 독은 항목이 하나뿐이어도 가장 넓은 말풍선이 창 안에 들어간다
-        let one = DockLayout::compute(DockEdge::Bottom, 1, false);
-        assert!(one.max_length() + 2.0 * one.side_room() >= TOOLTIP_MAX_W + 16.0);
+    fn room_follows_the_longest_tooltip() {
+        let side = DockLayout::compute(DockEdge::Right, 3, false);
+        assert_eq!(side.headroom(100.0), HEADROOM);
+        let long = side.headroom(600.0);
+        assert!(THICK + long >= PAD + ICON * (1.0 + MAGNIFY) + 8.0 + 600.0, "{long}");
+        let bottom = DockLayout::compute(DockEdge::Bottom, 1, false);
+        assert!(bottom.max_length() + 2.0 * bottom.side_room(700.0) >= 700.0 + 16.0);
+        assert_eq!(bottom.side_room(10.0), SIDE_ROOM);
     }
 
     #[test]

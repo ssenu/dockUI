@@ -2,7 +2,7 @@
 
 use crate::config::DockEdge;
 use crate::config::Theme;
-use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot, TOOLTIP_MAX_W};
+use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
 use crate::ui::gfx::{Align, Gfx, Weight};
 use crate::ui::layout::{PANEL_HOVER_SCALE, PanelLayout, Pt, RectF, SWATCH};
 use crate::ui::theme::{ACCENT, Color, FALLBACK_ALPHA, PICKER_ORDER, Palette, TOOLTIP_BG, TOOLTIP_TEXT};
@@ -235,11 +235,14 @@ fn draw_header(g: &Gfx, s: &SceneState) {
     g.line(Pt { x: h.x, y: h.bottom() }, Pt { x: h.right(), y: h.bottom() }, p.divider, 1.0);
 }
 
-/// 말풍선 크기 (너비, 높이): 이름을 자르지 않고, `TOOLTIP_MAX_W`나 `room`보다 길면 줄을 바꾼다
-fn tooltip_size(g: &Gfx, text: &str, room: f32) -> (f32, f32) {
-    let max_w = TOOLTIP_MAX_W.min(room - 8.0).max(60.0);
-    let (w, h) = g.measure_block(text, 12.0, Weight::SemiBold, max_w - 20.0);
-    ((w + 20.0).ceil().clamp(40.0, max_w), (h + 10.0).ceil().max(26.0))
+/// 말풍선 크기 (너비, 높이): 한 줄. 이름 전체 폭에 맞추고, `room`보다 길면 `room`에서 … 으로
+pub fn tooltip_size(g: &Gfx, text: &str, room: f32) -> (f32, f32) {
+    ((g.measure(text, 12.0, Weight::SemiBold) + 20.0).ceil().min(room.max(40.0)).max(40.0), 26.0)
+}
+
+/// 이 이름들 중 가장 긴 말풍선 폭 (`cap`을 넘지 않게)
+pub fn longest_tip(g: &Gfx, labels: &[&str], cap: f32) -> f32 {
+    labels.iter().map(|t| tooltip_size(g, t, cap).0).fold(0.0, f32::max)
 }
 
 /// 사각형을 실제 화면 픽셀 경계에 맞춘다 (`scale` = DIP → px 배율).
@@ -262,7 +265,7 @@ fn draw_tooltip_box(g: &Gfx, text: &str, r: RectF, alpha: f32, scale: f32) {
     // 글자 영역도 픽셀 경계에서 시작하고 너비가 고정이어야 글자 간격·줄바꿈이 프레임마다 같다
     let pad = (10.0 * scale).round() / scale;
     let inner = RectF::new(r.x + pad, r.y, r.w - 2.0 * pad, r.h);
-    g.text_block(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT.with_alpha(alpha));
+    g.text(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT.with_alpha(alpha));
 }
 
 /// 아이콘 위에 말풍선을 띄운다. 위쪽이 `top_limit`보다 올라가면(헤더를 가리면) 아래에 띄운다.
@@ -463,8 +466,13 @@ fn draw_edit_button(g: &Gfx, r: RectF, slot: Slot, p: &Palette, hover: bool) {
 
 /// 독 말풍선 사각형: 판 반대쪽(화면 안쪽)에 띄운다. 창 영역 계산에도 쓴다.
 pub fn dock_tooltip_rect(g: &Gfx, text: &str, icon: RectF, edge: DockEdge, bounds: (f32, f32)) -> RectF {
-    let room = if dock_layout::is_vertical(edge) { bounds.0 - icon.right() - 8.0 } else { bounds.0 };
-    let (w, h) = tooltip_size(g, text, room.max(68.0));
+    // 말풍선이 나갈 쪽으로 쓸 수 있는 폭 (오른쪽 독은 왼쪽, 왼쪽 독은 오른쪽)
+    let room = match edge {
+        DockEdge::Left => bounds.0 - icon.right() - 12.0,
+        DockEdge::Right => icon.x - 12.0,
+        _ => bounds.0 - 8.0,
+    };
+    let (w, h) = tooltip_size(g, text, room);
     let c = icon.center();
     let (x, y) = match edge {
         DockEdge::Bottom => (c.x - w / 2.0, icon.y - h - 8.0),
@@ -604,6 +612,23 @@ mod tests {
     }
 
     #[test]
+    fn tooltip_is_one_line_as_wide_as_the_name() {
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
+        };
+        let g = Gfx::offscreen(10, 10, 1.0).unwrap();
+        let short = tooltip_size(&g, "뉴스", 2000.0);
+        let long =
+            tooltip_size(&g, "아침 뉴스 라이브 - 오늘의 주요 소식 모아 보기 (전체 재생목록) 경제·사회·국제", 2000.0);
+        assert_eq!(short.1, 26.0);
+        assert_eq!(long.1, 26.0, "한 줄");
+        assert!(long.0 > 360.0, "예전 줄바꿈 폭(360)보다 넓어도 한 줄: {long:?}");
+        assert_eq!(tooltip_size(&g, "아주 아주 긴 이름 아주 아주 긴 이름", 120.0).0, 120.0, "상한은 room");
+        assert!(longest_tip(&g, &["뉴스", "아주 긴 이름 아주 긴 이름"], 5000.0) > short.0);
+        assert_eq!(longest_tip(&g, &["아주 긴 이름 아주 긴 이름"], 50.0), 50.0);
+    }
+
+    #[test]
     fn badge_takes_two_visible_chars() {
         assert_eq!(badge_of("  로파이 음악"), "로파");
         assert_eq!(badge_of("a b c"), "ab");
@@ -699,6 +724,7 @@ mod tests {
 
     #[test]
     fn renders_dock_snapshots_for_bottom_and_left_edges() {
+        const TIP: f32 = 560.0;
         use crate::ui::gfx::Gfx;
         let _ = unsafe {
             windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
@@ -747,19 +773,22 @@ mod tests {
             kind: TileKind::Update,
             ..Default::default()
         });
-        for (edge, name) in [(DockEdge::Bottom, "bottom"), (DockEdge::Left, "left")] {
+        for (edge, name) in [(DockEdge::Bottom, "bottom"), (DockEdge::Left, "left"), (DockEdge::Right, "right")] {
             let editing = edge == DockEdge::Left;
             let layout = DockLayout::compute(edge, tiles.len(), editing);
             let mag = if editing { layout.magnified(None, 0.0) } else { layout.magnified(Some(layout.rest[1]), 1.0) };
             let max = layout.max_length();
             let vertical = dock_layout::is_vertical(edge);
             let (w, h) = if vertical {
-                (dock_layout::THICK + layout.headroom(), max + 2.0 * layout.side_room())
+                (dock_layout::THICK + layout.headroom(TIP), max + 2.0 * layout.side_room(TIP))
             } else {
-                (max + 2.0 * layout.side_room(), dock_layout::THICK + layout.headroom())
+                (max + 2.0 * layout.side_room(TIP), dock_layout::THICK + layout.headroom(TIP))
             };
-            let center =
-                if vertical { (dock_layout::THICK / 2.0, h / 2.0) } else { (w / 2.0, h - dock_layout::THICK / 2.0) };
+            let center = match edge {
+                DockEdge::Left => (dock_layout::THICK / 2.0, h / 2.0),
+                DockEdge::Right => (w - dock_layout::THICK / 2.0, h / 2.0),
+                _ => (w / 2.0, h - dock_layout::THICK / 2.0),
+            };
             let gfx = Gfx::offscreen((w * 2.0) as u32, (h * 2.0) as u32, 2.0).unwrap();
             let state = DockScene {
                 layout: &layout,
