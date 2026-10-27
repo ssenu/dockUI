@@ -498,16 +498,15 @@ impl Panel {
 
     /// 지금 항목들 중 가장 긴 말풍선 폭 (DIP, 작업 영역 폭을 넘지 않게)
     fn longest_tip(&self) -> f32 {
-        let cap = desktop::primary_work_area().2 as f32 / self.scale;
         let Some(gfx) = &self.gfx else { return 200.0 };
         let mut labels: Vec<&str> = self.tiles.iter().map(|t| t.label.as_str()).collect();
         labels.push("항목 추가");
-        scene::longest_tip(gfx, &labels, cap)
+        scene::longest_tip(gfx, &labels)
     }
 
     fn place_dock(&mut self) {
-        // 독 그리기 배율로 잰 폭이 아니라 DIP 폭을 쓰므로 배율로 나눠 맞춘다
-        let tip = self.longest_tip() / dock_layout::zoom_for(self.dock.size);
+        // 말풍선 글자도 독 배율로 그려지므로 잰 폭이 그대로 독 DIP 폭이다
+        let tip = self.longest_tip();
         let s = self.dock_scale();
         let d = &mut self.dock;
         d.layout = DockLayout::compute(d.edge, self.tiles.len(), d.editing);

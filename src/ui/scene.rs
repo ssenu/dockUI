@@ -201,14 +201,15 @@ fn draw_header(g: &Gfx, s: &SceneState) {
     g.line(Pt { x: h.x, y: h.bottom() }, Pt { x: h.right(), y: h.bottom() }, p.divider, 1.0);
 }
 
-/// 말풍선 크기 (너비, 높이): 한 줄. 이름 전체 폭에 맞추고, `room`보다 길면 `room`에서 … 으로
-pub fn tooltip_size(g: &Gfx, text: &str, room: f32) -> (f32, f32) {
-    ((g.measure(text, 12.0, Weight::SemiBold) + 20.0).ceil().min(room.max(40.0)).max(40.0), 26.0)
+/// 말풍선 크기 (너비, 높이): 한 줄, 이름 전체 (줄이지 않는다).
+/// 여백 10×2에 픽셀 맞춤 반올림 여유 4를 더한다 (여유가 없으면 175% 등에서 글자 칸이 모자라 끝이 … 으로 바뀐다).
+pub fn tooltip_size(g: &Gfx, text: &str) -> (f32, f32) {
+    ((g.measure(text, 12.0, Weight::SemiBold) + 24.0).ceil(), 26.0)
 }
 
-/// 이 이름들 중 가장 긴 말풍선 폭 (`cap`을 넘지 않게)
-pub fn longest_tip(g: &Gfx, labels: &[&str], cap: f32) -> f32 {
-    labels.iter().map(|t| tooltip_size(g, t, cap).0).fold(0.0, f32::max)
+/// 이 이름들 중 가장 긴 말풍선 폭
+pub fn longest_tip(g: &Gfx, labels: &[&str]) -> f32 {
+    labels.iter().map(|t| tooltip_size(g, t).0).fold(0.0, f32::max)
 }
 
 /// 사각형을 실제 화면 픽셀 경계에 맞춘다 (`scale` = DIP → px 배율).
@@ -231,13 +232,13 @@ fn draw_tooltip_box(g: &Gfx, text: &str, r: RectF, alpha: f32, scale: f32) {
     // 글자 영역도 픽셀 경계에서 시작하고 너비가 고정이어야 글자 간격·줄바꿈이 프레임마다 같다
     let pad = (10.0 * scale).round() / scale;
     let inner = RectF::new(r.x + pad, r.y, r.w - 2.0 * pad, r.h);
-    g.text(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT.with_alpha(alpha));
+    g.text_untrimmed(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT.with_alpha(alpha));
 }
 
 /// 패널 말풍선 사각형 (콘텐츠 창 기준 DIP): 아이콘 위 가운데, 한 줄. `left..right`는 그릴 수 있는 가로 범위
 /// (패널 밖까지 넓힌 콘텐츠 창), 위가 `top_limit`(머리글)보다 올라가면 아이콘 아래에 띄운다.
 pub fn panel_tooltip_rect(g: &Gfx, text: &str, anchor: RectF, left: f32, right: f32, top_limit: f32) -> RectF {
-    let (w, h) = tooltip_size(g, text, right - left - 8.0);
+    let (w, h) = tooltip_size(g, text);
     let x = (anchor.center().x - w / 2.0).clamp(left + 4.0, (right - w - 4.0).max(left + 4.0));
     let mut y = anchor.y - h - 8.0;
     if y < top_limit {
@@ -335,8 +336,7 @@ pub struct DockScene<'a> {
 
 /// 수정 모드 안내 자리: 판에서 화면 안쪽으로 (콘텐츠 창 기준 DIP)
 pub fn edit_hint_rect(g: &Gfx, bar: RectF, edge: DockEdge, bounds: (f32, f32)) -> RectF {
-    let room = if dock_layout::is_vertical(edge) { bounds.0 - bar.right() - 12.0 } else { bounds.0 };
-    let (w, h) = tooltip_size(g, EDIT_HINT, room.max(68.0));
+    let (w, h) = tooltip_size(g, EDIT_HINT);
     let c = bar.center();
     let (x, y) = match edge {
         DockEdge::Bottom => (c.x - w / 2.0, bar.y - h - 10.0),
@@ -376,13 +376,7 @@ fn draw_edit_button(g: &Gfx, r: RectF, slot: Slot, p: &Palette, hover: bool) {
 
 /// 독 말풍선 사각형: 판 반대쪽(화면 안쪽)에 띄운다. 창 영역 계산에도 쓴다.
 pub fn dock_tooltip_rect(g: &Gfx, text: &str, icon: RectF, edge: DockEdge, bounds: (f32, f32)) -> RectF {
-    // 말풍선이 나갈 쪽으로 쓸 수 있는 폭 (오른쪽 독은 왼쪽, 왼쪽 독은 오른쪽)
-    let room = match edge {
-        DockEdge::Left => bounds.0 - icon.right() - 12.0,
-        DockEdge::Right => icon.x - 12.0,
-        _ => bounds.0 - 8.0,
-    };
-    let (w, h) = tooltip_size(g, text, room);
+    let (w, h) = tooltip_size(g, text);
     let c = icon.center();
     let (x, y) = match edge {
         DockEdge::Bottom => (c.x - w / 2.0, icon.y - h - 8.0),
@@ -528,15 +522,14 @@ mod tests {
             windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
         };
         let g = Gfx::offscreen(10, 10, 1.0).unwrap();
-        let short = tooltip_size(&g, "뉴스", 2000.0);
-        let long =
-            tooltip_size(&g, "아침 뉴스 라이브 - 오늘의 주요 소식 모아 보기 (전체 재생목록) 경제·사회·국제", 2000.0);
-        assert_eq!(short.1, 26.0);
-        assert_eq!(long.1, 26.0, "한 줄");
-        assert!(long.0 > 360.0, "예전 줄바꿈 폭(360)보다 넓어도 한 줄: {long:?}");
-        assert_eq!(tooltip_size(&g, "아주 아주 긴 이름 아주 아주 긴 이름", 120.0).0, 120.0, "상한은 room");
-        assert!(longest_tip(&g, &["뉴스", "아주 긴 이름 아주 긴 이름"], 5000.0) > short.0);
-        assert_eq!(longest_tip(&g, &["아주 긴 이름 아주 긴 이름"], 50.0), 50.0);
+        let short = tooltip_size(&g, "뉴스");
+        let long = tooltip_size(&g, "아침 뉴스 라이브 - 오늘의 주요 소식 모아 보기 (전체 재생목록) 경제·사회·국제");
+        assert_eq!((short.1, long.1), (26.0, 26.0));
+        assert!(long.0 > 360.0, "{long:?}");
+        // 여백 10×2에 반올림 여유가 있어야 175% 등에서 글자 칸이 글자보다 좁아지지 않는다 (… 방지)
+        let text_w = g.measure("뉴스", 12.0, Weight::SemiBold);
+        assert!(short.0 >= text_w + 2.0 * (10.0 * 1.75f32).round() / 1.75);
+        assert!(longest_tip(&g, &["뉴스", "아주 긴 이름 아주 긴 이름"]) > short.0);
     }
 
     #[test]

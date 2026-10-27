@@ -15,10 +15,10 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
     D2D1_BITMAP_PROPERTIES1, D2D1_BRUSH_PROPERTIES, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
-    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1RenderTarget,
-    ID2D1SolidColorBrush,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_OPTIONS,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1,
+    ID2D1DeviceContext, ID2D1Factory1, ID2D1RenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -31,8 +31,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_METRICS,
     DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_TRIMMING_GRANULARITY_NONE,
-    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory, IDWriteFactory5,
-    IDWriteFontCollection1, IDWriteTextFormat,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory5, IDWriteFontCollection1, IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
@@ -508,21 +507,21 @@ impl Gfx {
     }
 
     fn text_format(&self, size: f32, weight: Weight, align: Align) -> Option<IDWriteTextFormat> {
-        self.format(size, weight, align, false)
+        self.format(size, weight, align, true)
     }
 
-    /// 캐시된 글자 형식. `block`이면 줄바꿈하고 자르지 않는다, 아니면 한 줄에 넘치면 … 으로.
-    fn format(&self, size: f32, weight: Weight, align: Align, block: bool) -> Option<IDWriteTextFormat> {
-        let key = (size.to_bits(), weight, align, block);
+    /// 캐시된 한 줄 글자 형식. `trim`이면 넘칠 때 끝을 … 으로, 아니면 자르지 않는다.
+    fn format(&self, size: f32, weight: Weight, align: Align, trim: bool) -> Option<IDWriteTextFormat> {
+        let key = (size.to_bits(), weight, align, trim);
         if let Some(f) = self.formats.borrow().get(&key) {
             return Some(f.clone());
         }
-        let format = self.create_format(size, weight, align, block)?;
+        let format = self.create_format(size, weight, align, trim)?;
         self.formats.borrow_mut().insert(key, format.clone());
         Some(format)
     }
 
-    fn create_format(&self, size: f32, weight: Weight, align: Align, block: bool) -> Option<IDWriteTextFormat> {
+    fn create_format(&self, size: f32, weight: Weight, align: Align, trim: bool) -> Option<IDWriteTextFormat> {
         let weight = DWRITE_FONT_WEIGHT(match weight {
             Weight::Regular => 400,
             Weight::SemiBold => 600,
@@ -547,13 +546,12 @@ impl Gfx {
                 Align::Center => DWRITE_TEXT_ALIGNMENT(2),
             });
             let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT(2)); // 세로 가운데
-            if block {
-                let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            if !trim {
                 let none =
                     DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_NONE, delimiter: 0, delimiterCount: 0 };
                 let _ = format.SetTrimming(&none, None);
             } else {
-                let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
                 let trimming = DWRITE_TRIMMING {
                     granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
                     delimiter: 0,
@@ -564,6 +562,22 @@ impl Gfx {
             }
             Some(format)
         }
+    }
+
+    /// 한 줄 텍스트, 줄이지 않는다 (말풍선 이름: 칸보다 길어도 … 없이 그대로 그린다)
+    pub fn text_untrimmed(&self, text: &str, r: RectF, size: f32, weight: Weight, align: Align, c: Color) {
+        let (Some(format), Some(brush)) = (self.format(size, weight, align, false), self.brush(c)) else { return };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            self.ctx.DrawText(
+                &wide,
+                &format,
+                &rect(r),
+                &brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            )
+        };
     }
 
     /// 사각형 안에 한 줄 텍스트 (세로 가운데, 넘치면 … 으로)
