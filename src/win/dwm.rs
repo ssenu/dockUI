@@ -64,19 +64,26 @@ const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 const WCA_ACCENT_POLICY: u32 = 19;
 type SetWindowCompositionAttribute = unsafe extern "system" fn(HWND, *mut CompositionAttribData) -> BOOL;
 
+/// 아크릴 흐림을 끈다 (사용자 지정 테마에서 흐림 끄기)
+pub fn disable_blur(hwnd: HWND) {
+    set_accent(hwnd, ACCENT_DISABLED);
+}
+
+const ACCENT_DISABLED: u32 = 0;
+
 /// 셸 창과 같은 아크릴 흐림을 켠다. 함수를 찾지 못하면 false.
 fn enable_accent_blur(hwnd: HWND) -> bool {
+    set_accent(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND)
+}
+
+/// 창의 강조(흐림) 정책을 정한다. 함수를 찾지 못하면 false.
+fn set_accent(hwnd: HWND, state: u32) -> bool {
     // SAFETY: user32의 내보낸 함수를 이름으로 찾아 정해진 구조체로 호출한다
     unsafe {
         let Ok(user32) = GetModuleHandleW(w!("user32.dll")) else { return false };
         let Some(proc) = GetProcAddress(user32, s!("SetWindowCompositionAttribute")) else { return false };
         let set: SetWindowCompositionAttribute = std::mem::transmute(proc);
-        let mut policy = AccentPolicy {
-            state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
-            flags: 0,
-            gradient_color: 0x0100_0000,
-            animation_id: 0,
-        };
+        let mut policy = AccentPolicy { state, flags: 0, gradient_color: 0x0100_0000, animation_id: 0 };
         let mut data = CompositionAttribData {
             attribute: WCA_ACCENT_POLICY,
             data: (&mut policy as *mut AccentPolicy).cast(),

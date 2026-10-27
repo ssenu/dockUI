@@ -1,6 +1,6 @@
 //! 테마 4가지(라이트·다크·세피아·투명)의 색표. 유리(아크릴) 위에 덧칠하는 색과 글자색.
 
-use crate::config::Theme;
+use crate::config::{CustomTheme, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
@@ -104,7 +104,50 @@ pub fn palette(theme: Theme) -> Palette {
             swatch: Color::hex(0x3A3D44, 1.0),
             dark_backdrop: true,
         },
+        Theme::Custom => custom_palette(&CustomTheme::default()),
     }
+}
+
+/// 사용자 지정 설정 창의 추천 색
+pub const PRESETS: [u32; 12] = [
+    0x1E1E1E, 0x2B2D42, 0x1F3A5F, 0x0F4C5C, 0x2D6A4F, 0x5C3D2E, 0x6B2737, 0x4A3B6B, 0xF5F5F5, 0xF4ECD8, 0xDDE7F0,
+    0xFFE4E1,
+];
+
+/// 사용자 지정 색표: 바탕은 고른 색·불투명도, 글자·구분선은 바탕 밝기에 맞춰 자동 (어두우면 흰 글자)
+pub fn custom_palette(c: &CustomTheme) -> Palette {
+    let bg = Color::hex(c.color, 1.0);
+    let lum = 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b;
+    let dark = lum < 0.55;
+    let text = if dark { Color::hex(0xFFFFFF, 1.0) } else { Color::hex(0x1F232B, 1.0) };
+    Palette {
+        tint: bg.with_alpha(c.opacity.min(100) as f32 / 100.0),
+        text,
+        subtext: text.with_alpha(0.68),
+        divider: text.with_alpha(if dark { 0.18 } else { 0.12 }),
+        add_tile: text.with_alpha(if dark { 0.10 } else { 0.07 }),
+        swatch: bg,
+        dark_backdrop: dark,
+    }
+}
+
+/// `#RGB`, `#RRGGBB` (`#` 없어도) → 0xRRGGBB
+pub fn parse_hex(s: &str) -> Option<u32> {
+    let h = s.trim().trim_start_matches('#');
+    if !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let full: String = match h.len() {
+        3 => h.chars().flat_map(|c| [c, c]).collect(),
+        6 => h.to_string(),
+        _ => return None,
+    };
+    u32::from_str_radix(&full, 16).ok()
+}
+
+/// 0xRRGGBB → `#RRGGBB`
+pub fn to_hex(rgb: u32) -> String {
+    format!("#{:06X}", rgb & 0xFF_FFFF)
 }
 
 /// 테마 선택기에 나오는 순서
@@ -116,6 +159,7 @@ pub fn label(theme: Theme) -> &'static str {
         Theme::Dark => "다크",
         Theme::Sepia => "세피아",
         Theme::Glass => "투명",
+        Theme::Custom => "사용자 지정",
     }
 }
 
@@ -135,6 +179,28 @@ pub fn blend(from: &Palette, to: &Palette, t: f32) -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_palette_picks_readable_text() {
+        let dark = custom_palette(&CustomTheme { color: 0x1E1E1E, opacity: 60, blur: true });
+        assert_eq!(dark.text, Color::hex(0xFFFFFF, 1.0));
+        assert!(dark.dark_backdrop);
+        assert!((dark.tint.a - 0.6).abs() < 1e-6);
+        let light = custom_palette(&CustomTheme { color: 0xF4ECD8, opacity: 90, blur: false });
+        assert_eq!(light.text, Color::hex(0x1F232B, 1.0));
+        assert!(!light.dark_backdrop);
+    }
+
+    #[test]
+    fn hex_parses_short_long_and_bare() {
+        assert_eq!(parse_hex("#1E1E1E"), Some(0x1E1E1E));
+        assert_eq!(parse_hex("1e1e1e"), Some(0x1E1E1E));
+        assert_eq!(parse_hex(" #abc "), Some(0xAABBCC));
+        assert_eq!(parse_hex("#12345"), None);
+        assert_eq!(parse_hex("zzzzzz"), None);
+        assert_eq!(parse_hex("+12345"), None);
+        assert_eq!(to_hex(0x0F4C5C), "#0F4C5C");
+    }
 
     #[test]
     fn hex_parses_channels() {

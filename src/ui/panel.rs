@@ -7,7 +7,7 @@
 //! 앱과는 메시지로만 주고받는다. 앱 → 화면은 `PanelHandle::send(PanelCmd)`,
 //! 화면 → 앱은 생성 때 받은 `notify(UiEvent)` 콜백.
 
-use crate::config::{DockEdge, Mode, Rect, Theme};
+use crate::config::{CustomTheme, DockEdge, Mode, Rect, Theme};
 use crate::logging;
 use crate::ui::anim::{Anim, Tween};
 use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};
@@ -25,7 +25,7 @@ use crate::win::menu::{MenuEntry, show_popup};
 use crate::win::msg_window::{Handler, WindowSpec, create_window};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BLACK_BRUSH, BeginPaint, CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EndPaint, FillRect,
@@ -38,14 +38,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyWindow, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, HTBOTTOM, HTBOTTOMLEFT,
-    HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HTTRANSPARENT, IDC_SIZEALL,
-    KillTimer, LoadCursorW, MA_NOACTIVATE, MINMAXINFO, PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WINDOWPOS, WM_ACTIVATE,
-    WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZING,
-    WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+    DestroyWindow, GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowThreadProcessId, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+    HTTOPLEFT, HTTOPRIGHT, HTTRANSPARENT, IDC_SIZEALL, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE, MINMAXINFO,
+    PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursor,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WA_INACTIVE, WINDOWPOS,
+    WM_ACTIVATE, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE,
+    WM_SIZING, WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 /// 앱 → 화면 명령이 채널에 들어왔음을 알리는 메시지
@@ -69,6 +70,8 @@ const CMD_DELETE: u32 = 2;
 pub enum PanelCmd {
     SetTiles(Vec<TileView>),
     SetTheme(Theme),
+    /// 사용자 지정 테마 값 (테마가 `Custom`이면 바로 보인다: 설정 창 미리보기)
+    SetCustomTheme(CustomTheme),
     SetLocked(bool),
     /// 독 모드 / 패널 모드와 독 위치를 바꾼다
     SetMode(Mode, DockEdge),
@@ -115,6 +118,8 @@ pub struct OpenSpec {
     pub theme: Theme,
     pub locked: bool,
     pub tiles: Vec<TileView>,
+    /// 사용자 지정 테마 값
+    pub custom_theme: CustomTheme,
     /// 독 위치 (가장자리를 따라 0..1, 0.5가 가운데)
     pub dock_offset: f32,
     /// 독 아이콘 크기 (DIP)
@@ -188,6 +193,9 @@ pub struct Panel {
     content: HWND,
     gfx: Option<Gfx>,
     acrylic: bool,
+    /// 사용자 지정 테마 값과, 지금 유리 창 흐림이 켜져 있는지
+    custom: CustomTheme,
+    blur_on: bool,
     scale: f32,
     mode: Mode,
     layout: PanelLayout,
@@ -298,6 +306,8 @@ impl Panel {
             content: HWND::default(),
             gfx: None,
             acrylic: false,
+            custom: spec.custom_theme,
+            blur_on: true,
             scale: 1.0,
             mode: spec.mode,
             layout: PanelLayout::compute(spec.panel_rect.2 as f32, spec.panel_rect.3 as f32, n),
@@ -323,7 +333,11 @@ impl Panel {
             press: None,
             drag: None,
             theme: spec.theme,
-            fade_from: theme::palette(spec.theme),
+            fade_from: if spec.theme == Theme::Custom {
+                theme::custom_palette(&spec.custom_theme)
+            } else {
+                theme::palette(spec.theme)
+            },
             fade: Tween::done(),
             locked: spec.locked,
             animating: false,
@@ -350,7 +364,9 @@ impl Panel {
         let rect = screen_rect(self.glass);
         desktop::pin_to_desktop(self.glass);
         self.scale = desktop::scale_for(self.glass);
-        self.acrylic = dwm::enable_acrylic(self.glass, theme::palette(self.theme).dark_backdrop);
+        self.acrylic = dwm::enable_acrylic(self.glass, self.theme_palette(self.theme).dark_backdrop);
+        // 사용자 지정 테마에서 흐림을 꺼 두었으면 시작할 때 바로 끈다
+        self.apply_backdrop();
         let content_spec = WindowSpec {
             class: CONTENT_CLASS,
             title: "",
@@ -385,7 +401,46 @@ impl Panel {
     }
 
     fn palette(&self) -> Palette {
-        theme::blend(&self.fade_from, &theme::palette(self.theme), self.fade.progress())
+        theme::blend(&self.fade_from, &self.theme_palette(self.theme), self.fade.progress())
+    }
+
+    /// 테마의 색표 (사용자 지정이면 지금 값으로)
+    fn theme_palette(&self, t: Theme) -> Palette {
+        if t == Theme::Custom { theme::custom_palette(&self.custom) } else { theme::palette(t) }
+    }
+
+    /// 흐림을 켤지: 사용자 지정에서 흐림을 끈 경우만 끈다
+    fn wants_blur(&self) -> bool {
+        self.theme != Theme::Custom || self.custom.blur
+    }
+
+    /// 유리 창 흐림을 지금 테마에 맞춘다. 끌 때는 아크릴을 끄고 유리 창을 거의 투명한 레이어드 창으로 바꿔
+    /// (검은 바탕은 안 보이고 클릭은 그대로 받는다) 덧칠 색이 고른 불투명도 그대로 비치게 한다.
+    fn apply_backdrop(&mut self) {
+        let want = self.wants_blur();
+        if want == self.blur_on || self.glass.0.is_null() {
+            return;
+        }
+        self.blur_on = want;
+        // SAFETY: 우리 유리 창의 확장 스타일·레이어드 속성만 바꾼다
+        unsafe {
+            let ex = GetWindowLongPtrW(self.glass, GWL_EXSTYLE);
+            if want {
+                SetWindowLongPtrW(self.glass, GWL_EXSTYLE, ex & !(WS_EX_LAYERED.0 as isize));
+                self.acrylic = dwm::enable_acrylic(self.glass, self.theme_palette(self.theme).dark_backdrop);
+            } else {
+                dwm::disable_blur(self.glass);
+                SetWindowLongPtrW(self.glass, GWL_EXSTYLE, ex | WS_EX_LAYERED.0 as isize);
+                let _ = SetLayeredWindowAttributes(self.glass, COLORREF(0), 1, LWA_ALPHA);
+            }
+        }
+        // 창 외곽 설정은 모드에 따라 다시
+        dwm::set_frame(self.glass, self.mode == Mode::Panel);
+    }
+
+    /// 장면에 넘길 "아크릴 켜짐": 흐림을 끈 사용자 지정은 고른 불투명도 그대로 (아크릴 실패 시처럼 진하게 하지 않음)
+    fn tint_as_is(&self) -> bool {
+        self.acrylic || !self.blur_on
     }
 
     /// 독 그리기 배율: DPI 배율 × 아이콘 크기 배율 (독은 48px 기준으로 배치하고 통째로 키운다)
@@ -701,7 +756,7 @@ impl Panel {
                 let state = SceneState {
                     layout: &self.layout,
                     palette: self.palette(),
-                    acrylic: self.acrylic,
+                    acrylic: self.tint_as_is(),
                     tiles: &self.tiles,
                     hover: &hover,
                     pressed,
@@ -730,7 +785,7 @@ impl Panel {
                     center: self.dock_center(),
                     size: self.dock_size(),
                     palette: self.palette(),
-                    acrylic: self.acrylic,
+                    acrylic: self.tint_as_is(),
                     tiles: &self.tiles,
                     pressed,
                     tooltip: self.tip_slot.filter(|&i| i < self.dock.layout.slots().len() && self.tip.value > 0.0),
@@ -1054,9 +1109,24 @@ impl Panel {
                     self.theme = theme;
                     self.fade = Tween::new(FADE_MS);
                     if self.acrylic {
-                        dwm::set_dark(self.glass, theme::palette(theme).dark_backdrop);
+                        dwm::set_dark(self.glass, self.theme_palette(theme).dark_backdrop);
                     }
+                    self.apply_backdrop();
                     self.start_animation();
+                }
+            }
+            PanelCmd::SetCustomTheme(custom) => {
+                if custom != self.custom {
+                    self.fade_from = self.palette();
+                    self.custom = custom;
+                    if self.theme == Theme::Custom {
+                        self.fade = Tween::new(FADE_MS);
+                        if self.acrylic {
+                            dwm::set_dark(self.glass, self.theme_palette(self.theme).dark_backdrop);
+                        }
+                        self.apply_backdrop();
+                        self.start_animation();
+                    }
                 }
             }
             PanelCmd::SetLocked(locked) => self.locked = locked,

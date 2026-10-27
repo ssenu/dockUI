@@ -38,6 +38,23 @@ pub enum Theme {
     Sepia,
     #[default]
     Glass,
+    /// 사용자 지정 (`Config.custom_theme`)
+    Custom,
+}
+
+/// 사용자 지정 테마: 바탕색(0xRRGGBB), 불투명도(0~100), 흐림
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomTheme {
+    pub color: u32,
+    pub opacity: u8,
+    pub blur: bool,
+}
+
+impl Default for CustomTheme {
+    fn default() -> Self {
+        CustomTheme { color: 0x1E1E1E, opacity: 60, blur: true }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +86,8 @@ pub struct Config {
     pub dock_offset: f32,
     /// 독 아이콘 크기 (DIP)
     pub dock_size: u32,
+    /// 사용자 지정 테마 값 (테마가 `Custom`일 때 쓴다)
+    pub custom_theme: CustomTheme,
 }
 
 impl Default for Config {
@@ -87,6 +106,7 @@ impl Default for Config {
             chrome_notice_shown: false,
             dock_offset: 0.5,
             dock_size: crate::ui::dock_layout::DEFAULT_SIZE,
+            custom_theme: CustomTheme::default(),
         }
     }
 }
@@ -221,6 +241,21 @@ pub fn migrate_v1(v1: &Value) -> Option<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_theme_round_trips_and_unknown_theme_falls_back() {
+        let c = Config {
+            theme: Theme::Custom,
+            custom_theme: CustomTheme { color: 0x2D6A4F, opacity: 35, blur: false },
+            ..Config::default()
+        };
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!((back.theme, back.custom_theme), (Theme::Custom, c.custom_theme));
+        assert!(serde_json::to_string(&c).unwrap().contains(r#""theme":"custom""#));
+        let old: Config = serde_json::from_str(r#"{"theme":"rainbow"}"#).unwrap();
+        assert_eq!(old.theme, Theme::default());
+        assert_eq!(old.custom_theme, CustomTheme::default());
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ytl-test-{name}-{}", crate::items::new_id()));
