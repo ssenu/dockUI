@@ -7,8 +7,8 @@
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
-    DwmSetWindowAttribute,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWINDOWATTRIBUTE,
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::Controls::MARGINS;
@@ -23,6 +23,19 @@ fn set_attr<T>(hwnd: HWND, attr: windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBU
 pub fn round_corners(hwnd: HWND) {
     let corner: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
     set_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner);
+}
+
+const DWMWA_BORDER_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(34);
+/// 테두리 그리지 않기 / 시스템 기본 테두리
+const COLOR_NONE: u32 = 0xFFFF_FFFE;
+const COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
+
+/// 창 외곽: 패널은 둥근 모서리 + 기본 테두리, 독은 모서리·테두리 없음
+/// (독 흐림 창은 가장 커졌을 때 크기로 고정해 두므로 그 외곽선이 보이면 안 된다)
+pub fn set_frame(hwnd: HWND, panel: bool) {
+    let corner: DWM_WINDOW_CORNER_PREFERENCE = if panel { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
+    set_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner);
+    set_attr(hwnd, DWMWA_BORDER_COLOR, &(if panel { COLOR_DEFAULT } else { COLOR_NONE }));
 }
 
 /// 블러 배경의 밝기 톤 (어두운 테마면 true)

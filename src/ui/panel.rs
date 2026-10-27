@@ -418,12 +418,16 @@ impl Panel {
         self.positioning = true;
         match self.mode {
             Mode::Panel => {
+                dwm::set_frame(self.glass, true);
                 // 독에서 걸어 둔 흐림 모양을 풀고 패널 크기로
                 let _ = unsafe { SetWindowRgn(self.glass, None, true) };
                 move_window(self.glass, self.panel_rect);
                 self.relayout_panel();
             }
-            Mode::Dock => self.place_dock(),
+            Mode::Dock => {
+                dwm::set_frame(self.glass, false);
+                self.place_dock();
+            }
         }
         self.positioning = false;
     }
