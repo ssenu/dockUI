@@ -47,13 +47,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
     WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZING, WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING,
     WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
 };
 
 /// 앱 → 화면 명령이 채널에 들어왔음을 알리는 메시지
 pub const WM_APP_PANEL: u32 = WM_APP + 10;
 const TIMER_ANIM: usize = 1;
 const TIMER_SAVE_GEOMETRY: usize = 2;
+/// 마우스 오버가 떠 있는 동안 커서가 아직 판 위에 있는지 확인하는 타이머 (나가기 알림이 안 오는 경우 대비)
+const TIMER_HOVER_POLL: usize = 3;
+const HOVER_POLL_MS: u32 = 120;
 /// 애니메이션 타이머 간격. 실제 프레임은 화면 합성 주기(DwmFlush)에 맞춘다.
 const FRAME_MS: u32 = 10;
 /// 프레임 사이 시간이 이보다 길면(창이 잠깐 멈춤 등) 이만큼만 진행한 것으로 본다
@@ -213,7 +216,6 @@ pub struct Panel {
     tiles: Vec<TileView>,
     hover: Vec<Anim>,
     hover_hit: Hit,
-    tracking_leave: bool,
     press: Option<Press>,
     drag: Option<(usize, Pt)>,
     theme: Theme,
@@ -221,6 +223,8 @@ pub struct Panel {
     fade: Tween,
     locked: bool,
     animating: bool,
+    /// 커서 위치 확인 타이머가 도는 중
+    hover_polling: bool,
     /// 지난 애니메이션 프레임 시각 (경과 시간으로 진행)
     last_frame: Instant,
     /// 마지막으로 놓은 유리 창·창 영역 (같으면 다시 하지 않는다)
@@ -340,7 +344,6 @@ impl Panel {
             hover: vec![Anim::at(0.0); n + 1],
             tiles: spec.tiles,
             hover_hit: Hit::Empty,
-            tracking_leave: false,
             press: None,
             drag: None,
             theme: spec.theme,
@@ -352,6 +355,7 @@ impl Panel {
             fade: Tween::done(),
             locked: spec.locked,
             animating: false,
+            hover_polling: false,
             last_frame: Instant::now(),
             last_glass: None,
             last_region: Vec::new(),
@@ -947,15 +951,15 @@ impl Panel {
     }
 
     fn on_mouse_move(&mut self, p: Pt) {
-        if !self.tracking_leave {
-            let mut tme = TRACKMOUSEEVENT {
-                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE,
-                hwndTrack: self.glass,
-                dwHoverTime: 0,
-            };
-            self.tracking_leave = unsafe { TrackMouseEvent(&mut tme) }.is_ok();
-        }
+        // 나가기 알림은 움직일 때마다 다시 건다 (한 번 놓친 알림 때문에 마우스 오버가 굳지 않게)
+        let mut tme = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: self.glass,
+            dwHoverTime: 0,
+        };
+        let _ = unsafe { TrackMouseEvent(&mut tme) };
+        self.hover_poll(true);
         if let Some(grab) = self.dock.moving {
             self.move_dock(grab);
             return;
@@ -992,7 +996,7 @@ impl Panel {
     }
 
     fn on_mouse_leave(&mut self) {
-        self.tracking_leave = false;
+        self.hover_poll(false);
         if self.drag.is_none() {
             self.set_hover(Hit::Empty);
             if self.mode == Mode::Dock {
@@ -1003,8 +1007,42 @@ impl Panel {
         }
     }
 
+    /// 커서가 지금 유리 창(판·패널) 위에 있고 다른 창에 가려지지 않았는지
+    fn cursor_over_glass(&self) -> bool {
+        let mut pt = POINT::default();
+        let _ = unsafe { GetCursorPos(&mut pt) };
+        let (x, y, w, h) = screen_rect(self.glass);
+        let inside = pt.x >= x && pt.x < x + w && pt.y >= y && pt.y < y + h;
+        // 콘텐츠 창은 클릭이 통과하므로 같은 스레드에서 물으면 그 아래 유리 창이 나온다
+        let top = unsafe { WindowFromPoint(pt) };
+        inside && (top == self.glass || top == self.content)
+    }
+
+    /// 마우스 오버(확대·말풍선)가 떠 있는 동안만 커서 위치 확인 타이머를 돌린다
+    fn hover_poll(&mut self, on: bool) {
+        if on != self.hover_polling {
+            self.hover_polling = on;
+            unsafe {
+                if on {
+                    SetTimer(Some(self.glass), TIMER_HOVER_POLL, HOVER_POLL_MS, None);
+                } else {
+                    let _ = KillTimer(Some(self.glass), TIMER_HOVER_POLL);
+                }
+            }
+        }
+    }
+
     fn on_button_up(&mut self, p: Pt) {
         let _ = unsafe { ReleaseCapture() };
+        // 누른 채(캡처 중) 판 밖으로 나가 놓으면 나가기 알림이 오지 않을 수 있어 직접 확인한다
+        let release_outside = !self.cursor_over_glass();
+        self.handle_button_up(p);
+        if release_outside {
+            self.on_mouse_leave();
+        }
+    }
+
+    fn handle_button_up(&mut self, p: Pt) {
         let press = self.press.take();
         if self.dock.moving.take().is_some() {
             self.emit_dock_changed();
@@ -1325,6 +1363,12 @@ impl Handler for Panel {
             }
             WM_TIMER => match wparam.0 {
                 TIMER_ANIM => self.tick(),
+                TIMER_HOVER_POLL => {
+                    // 누르거나 끄는 중이 아니고 커서가 판을 벗어났으면(말풍선 위·다른 창 위 포함) 바로 마우스 오버를 끈다
+                    if self.press.is_none() && self.drag.is_none() && !self.cursor_over_glass() {
+                        self.on_mouse_leave();
+                    }
+                }
                 TIMER_SAVE_GEOMETRY => {
                     let _ = unsafe { KillTimer(Some(hwnd), TIMER_SAVE_GEOMETRY) };
                     if self.mode == Mode::Panel {
