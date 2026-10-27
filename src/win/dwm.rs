@@ -107,3 +107,128 @@ pub fn enable_acrylic(hwnd: HWND, dark: bool) -> bool {
     let backdrop: DWM_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW;
     set_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::win::msg_window::{Handler, WindowSpec, create_window};
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
+        CreateRoundRectRgn, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetDIBits,
+        GetStockObject, HBRUSH, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject, SetWindowRgn,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, SW_SHOWNOACTIVATE, ShowWindow,
+        TranslateMessage, WM_PAINT, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    };
+
+    struct Black;
+    impl Handler for Black {
+        fn handle(&mut self, hwnd: HWND, msg: u32, _: WPARAM, _: LPARAM) -> Option<LRESULT> {
+            if msg == WM_PAINT {
+                let mut ps = PAINTSTRUCT::default();
+                unsafe {
+                    let dc = BeginPaint(hwnd, &mut ps);
+                    FillRect(dc, &ps.rcPaint, HBRUSH(GetStockObject(BLACK_BRUSH).0));
+                    let _ = EndPaint(hwnd, &ps);
+                }
+                return Some(LRESULT(0));
+            }
+            None
+        }
+    }
+
+    fn pump(ms: u64) {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        let mut msg = MSG::default();
+        while std::time::Instant::now() < end {
+            unsafe {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn capture_bmp(x: i32, y: i32, w: i32, h: i32, path: &std::path::Path) {
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: h,
+                biPlanes: 1,
+                biBitCount: 32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        unsafe {
+            let screen = GetDC(None);
+            let mem = CreateCompatibleDC(Some(screen));
+            let bmp = CreateCompatibleBitmap(screen, w, h);
+            let old = SelectObject(mem, bmp.into());
+            let _ = BitBlt(mem, 0, 0, w, h, Some(screen), x, y, SRCCOPY);
+            SelectObject(mem, old);
+            GetDIBits(mem, bmp, 0, h as u32, Some(pixels.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
+            let _ = DeleteObject(bmp.into());
+            let _ = DeleteDC(mem);
+            ReleaseDC(None, screen);
+        }
+        let mut file = Vec::new();
+        file.extend_from_slice(b"BM");
+        file.extend_from_slice(&(54 + pixels.len() as u32).to_le_bytes());
+        file.extend_from_slice(&0u32.to_le_bytes());
+        file.extend_from_slice(&54u32.to_le_bytes());
+        file.extend_from_slice(&40u32.to_le_bytes());
+        file.extend_from_slice(&w.to_le_bytes());
+        file.extend_from_slice(&h.to_le_bytes());
+        file.extend_from_slice(&1u16.to_le_bytes());
+        file.extend_from_slice(&32u16.to_le_bytes());
+        file.extend_from_slice(&[0u8; 24]);
+        file.extend_from_slice(&pixels);
+        std::fs::write(path, file).unwrap();
+    }
+
+    /// 실험: 흐림 창에 판 모양 영역을 걸 때 다시 그리기(bRedraw) 여부에 따라 흐림이 모양을 따르는지 화면으로 본다.
+    /// 사용자 화면에 0.5초쯤 시험 창 두 개가 뜬다: `cargo test blur_region_probe -- --ignored`
+    #[test]
+    #[ignore]
+    fn blur_region_probe() {
+        let (x0, y0, w, h) = (300, 200, 100, 400);
+        let mut wins = Vec::new();
+        for i in 0..2 {
+            let spec = WindowSpec {
+                class: "DockUIBlurProbe",
+                title: "probe",
+                ex_style: WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                style: WS_POPUP,
+                rect: (x0 + i * 160, y0, w, h),
+                owner: None,
+            };
+            let hwnd = create_window(&spec, Box::new(Black)).unwrap();
+            enable_acrylic(hwnd, true);
+            set_frame(hwnd, false);
+            let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+            wins.push(hwnd);
+        }
+        pump(300);
+        // 아래 60px을 잘라낸 둥근 판 모양: 왼쪽은 다시 그리기 없이, 오른쪽은 다시 그리기와 함께
+        for (i, hwnd) in wins.iter().enumerate() {
+            unsafe {
+                let rgn = CreateRoundRectRgn(0, 20, w + 1, h - 60 + 1, 16, 16);
+                let _ = SetWindowRgn(*hwnd, Some(rgn), i == 1);
+            }
+        }
+        pump(500);
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("snapshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        capture_bmp(x0 - 20, y0 - 20, 320, h + 40, &dir.join("blur-probe.bmp"));
+        for hwnd in wins {
+            let _ = unsafe { DestroyWindow(hwnd) };
+        }
+    }
+}
