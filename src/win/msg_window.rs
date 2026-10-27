@@ -16,6 +16,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, GetWindowLongPtrW, IDC_ARROW, LoadCursorW, MSG, PostMessageW, RegisterClassW, SetWindowLongPtrW,
     TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_NCCREATE, WM_NCDESTROY, WNDCLASSW, WS_OVERLAPPED,
 };
+/// 마우스가 창을 떠났다는 알림 (Controls 모듈 상수를 쓰지 않으려고 값만 둔다)
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
 use windows::core::{HSTRING, PCWSTR};
 
 pub trait Handler {
@@ -53,7 +56,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
         let Ok(mut handler) = slot.handler.try_borrow_mut() else {
-            if (WM_APP..0xC000).contains(&msg) {
+            // 앱 메시지와 마우스 나가기 알림은 미뤄 둔다. 나가기 알림을 버리면(예: 우클릭 메뉴가 떠 있는 동안
+            // 마우스가 창을 벗어남) 창은 마우스가 아직 위에 있다고 믿고 마우스 오버 상태가 풀리지 않는다.
+            if (WM_APP..0xC000).contains(&msg) || msg == WM_MOUSELEAVE {
                 slot.deferred.borrow_mut().push((msg, wparam, lparam));
                 return LRESULT(0);
             }
@@ -151,7 +156,43 @@ pub fn run_loop() -> i32 {
 mod tests {
     use super::*;
     use std::rc::Rc;
-    use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, PM_REMOVE, PeekMessageW};
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, PM_REMOVE, PeekMessageW, SendMessageW};
+
+    /// 처리 중(예: 우클릭 메뉴의 자체 루프)에 같은 창으로 온 WM_MOUSELEAVE가 어떻게 되는지 기록한다
+    struct Reentrant {
+        leaves: Rc<Cell<u32>>,
+    }
+
+    impl Handler for Reentrant {
+        fn handle(&mut self, hwnd: HWND, msg: u32, _w: WPARAM, _l: LPARAM) -> Option<LRESULT> {
+            match msg {
+                WM_APP => {
+                    // 처리 도중 나가기 알림이 온다 (메뉴가 떠 있는 동안 마우스가 창을 벗어난 상황)
+                    unsafe { SendMessageW(hwnd, WM_MOUSELEAVE, None, None) };
+                    Some(LRESULT(0))
+                }
+                WM_MOUSELEAVE => {
+                    self.leaves.set(self.leaves.get() + 1);
+                    Some(LRESULT(0))
+                }
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_leave_during_busy_handler_is_not_lost() {
+        let leaves = Rc::new(Cell::new(0));
+        let hwnd = create("YTLauncherTestReentrantLeave", Box::new(Reentrant { leaves: leaves.clone() })).unwrap();
+        unsafe { SendMessageW(hwnd, WM_APP, None, None) };
+        // 미뤄 둔 메시지를 처리한다
+        let mut msg = MSG::default();
+        while unsafe { PeekMessageW(&mut msg, Some(hwnd), 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe { DispatchMessageW(&msg) };
+        }
+        assert_eq!(leaves.get(), 1, "바쁠 때 온 WM_MOUSELEAVE도 나중에 받아야 한다");
+        let _ = unsafe { DestroyWindow(hwnd) };
+    }
 
     struct SelfDestroying {
         drops: Rc<Cell<u32>>,
