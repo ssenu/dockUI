@@ -420,16 +420,6 @@ pub struct DockScene<'a> {
     pub px_scale: f32,
 }
 
-/// 판 끝 "by ssenu" 글자 칸 (콘텐츠 창 기준 DIP)
-pub fn credit_rect(layout: &DockLayout, mag: &Magnified, center: (f32, f32)) -> RectF {
-    let bar = layout.bar_rect(mag, center);
-    if dock_layout::is_vertical(layout.edge) {
-        RectF::new(bar.x, center.1 + mag.credit - dock_layout::CREDIT_H / 2.0, bar.w, dock_layout::CREDIT_H)
-    } else {
-        RectF::new(center.0 + mag.credit - dock_layout::CREDIT_W / 2.0, bar.y, dock_layout::CREDIT_W, bar.h)
-    }
-}
-
 /// 수정 모드 안내 자리: 판에서 화면 안쪽으로 (콘텐츠 창 기준 DIP)
 pub fn edit_hint_rect(g: &Gfx, bar: RectF, edge: DockEdge, bounds: (f32, f32)) -> RectF {
     let room = if dock_layout::is_vertical(edge) { bounds.0 - bar.right() - 12.0 } else { bounds.0 };
@@ -444,19 +434,6 @@ pub fn edit_hint_rect(g: &Gfx, bar: RectF, edge: DockEdge, bounds: (f32, f32)) -
     let x = x.clamp(4.0, (bounds.0 - w - 4.0).max(4.0));
     let y = y.clamp(4.0, (bounds.1 - h - 4.0).max(4.0));
     RectF::new(x, y, w, h)
-}
-
-/// 만든 사람 표시: 판 끝 글자 칸에 연한 글씨. 세로 독은 한 줄, 가로 독은 `by` / `ssenu` 두 줄
-fn draw_credit(g: &Gfx, r: RectF, p: &Palette, vertical: bool) {
-    let c = p.subtext.with_alpha(0.55);
-    if vertical {
-        g.text("by ssenu", r, 9.0, Weight::SemiBold, Align::Center, c);
-        return;
-    }
-    let line = 11.0;
-    let top = r.center().y - line;
-    g.text("by", RectF::new(r.x, top, r.w, line), 9.0, Weight::SemiBold, Align::Center, c);
-    g.text("ssenu", RectF::new(r.x, top + line, r.w, line), 9.0, Weight::SemiBold, Align::Center, c);
 }
 
 /// 수정 모드 단추: 작게(−) / 크게(＋)는 납작한 원, 완료는 강조색 원에 체크
@@ -524,7 +501,6 @@ pub fn draw_dock(g: &Gfx, s: &DockScene) {
         let inner = RectF::new(bar.x + 1.0, bar.y + 1.0, bar.w - 2.0, bar.h - 2.0);
         g.stroke_round_rect(inner, WINDOW_RADIUS - 1.0, ACCENT, 1.6);
     }
-    draw_credit(g, credit_rect(s.layout, s.mag, s.center), p, dock_layout::is_vertical(s.layout.edge));
     if let Some(along) = s.mag.separator {
         let inset = dock_layout::PAD + 6.0;
         let (a, b) = if dock_layout::is_vertical(s.layout.edge) {
