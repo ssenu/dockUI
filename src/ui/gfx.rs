@@ -323,6 +323,11 @@ impl Gfx {
         }
     }
 
+    /// 이후 그리기를 (dx, dy) DIP만큼 옮긴다 (패널을 넓은 콘텐츠 창 안쪽에 그릴 때)
+    pub fn set_offset(&self, dx: f32, dy: f32) {
+        unsafe { self.ctx.SetTransform(&Matrix3x2::translation(dx, dy)) };
+    }
+
     pub fn end(&self) -> Result<()> {
         // SAFETY: 그리기 끝내고 화면에 보냄
         unsafe {

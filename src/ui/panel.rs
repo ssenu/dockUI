@@ -210,7 +210,9 @@ pub struct Panel {
     /// 마지막으로 놓은 유리 창·창 영역 (같으면 다시 하지 않는다)
     last_glass: Option<PxRect>,
     last_region: Vec<PxRect>,
-    /// 독 말풍선 불투명도 (페이드)와 마지막으로 보인 칸 (사라질 때도 그 자리에서 사라지게)
+    /// 패널 콘텐츠 창이 패널 좌우로 더 차지하는 폭 (px, 긴 말풍선용)
+    panel_side: i32,
+    /// 말풍선 불투명도 (페이드)와 마지막으로 보인 칸 (사라질 때도 그 자리에서 사라지게). 독·패널 공용
     tip: Anim,
     tip_slot: Option<usize>,
     rx: Receiver<PanelCmd>,
@@ -252,6 +254,11 @@ pub fn initial_rect(saved: Option<Rect>) -> PxRect {
         Some(r) if is_visible_on_any((r.x, r.y, r.w, r.h), &works) => (r.x, r.y, r.w, r.h),
         _ => default_panel_rect(desktop::primary_work_area(), desktop::system_scale()),
     }
+}
+
+/// 패널 콘텐츠 창이 패널 좌우로 더 차지하는 폭 (px): 가장 긴 말풍선이 패널보다 넓을 때만
+fn panel_side_px(longest_tip: f32, panel_w: f32, scale: f32) -> i32 {
+    (((longest_tip + 16.0 - panel_w) / 2.0).max(0.0) * scale).ceil() as i32
 }
 
 /// 사각형들을 합친 창 영역을 만든다 (px, 창 기준 좌표)
@@ -320,6 +327,7 @@ impl Panel {
             last_frame: Instant::now(),
             last_glass: None,
             last_region: Vec::new(),
+            panel_side: 0,
             tip: Anim::at(0.0),
             tip_slot: None,
             rx,
@@ -408,7 +416,6 @@ impl Panel {
             Mode::Panel => {
                 move_window(self.glass, self.panel_rect);
                 self.relayout_panel();
-                let _ = unsafe { SetWindowRgn(self.content, None, true) };
             }
             Mode::Dock => self.place_dock(),
         }
@@ -420,10 +427,61 @@ impl Panel {
         self.panel_rect = (x, y, w, h);
         self.layout = PanelLayout::compute(w as f32 / self.scale, h as f32 / self.scale, self.tiles.len());
         self.hover.resize(self.tiles.len() + 1, Anim::at(0.0));
+        // 콘텐츠 창은 패널보다 좌우로 넓게: 패널보다 긴 이름 말풍선이 패널 밖까지 한 줄로 나가게
+        let side = panel_side_px(self.longest_tip(), w as f32 / self.scale, self.scale);
+        self.panel_side = side;
         if !self.content.0.is_null() {
-            move_window(self.content, (x, y, w, h));
+            move_window(self.content, (x - side, y, w + 2 * side, h));
         }
-        self.resize_gfx(w, h);
+        self.resize_gfx(w + 2 * side, h);
+        self.last_region.clear();
+        self.update_panel_region();
+    }
+
+    /// 패널 말풍선 사각형 (콘텐츠 창 기준 DIP)
+    fn panel_tooltip_rect(&self, cell: usize) -> Option<RectF> {
+        let gfx = self.gfx.as_ref()?;
+        let anchor = *self.layout.cells.get(cell)?;
+        let side = self.panel_side as f32 / self.scale;
+        let anchor = RectF::new(anchor.x + side, anchor.y, anchor.w, anchor.h);
+        let text = scene::panel_tooltip_text(&self.tiles, cell);
+        let right = self.layout.width + 2.0 * side;
+        Some(scene::panel_tooltip_rect(gfx, text, anchor, 0.0, right, self.layout.header.bottom()))
+    }
+
+    /// 패널 콘텐츠 창 표시 영역: 평소엔 패널만, 말풍선이 보이는 동안만 패널 + 말풍선 (바뀔 때만 설정)
+    fn update_panel_region(&mut self) {
+        if self.mode != Mode::Panel || self.content.0.is_null() {
+            return;
+        }
+        let (_, _, w, h) = self.panel_rect;
+        let mut rects = vec![(self.panel_side, 0, w, h)];
+        if self.tip.value > 0.0
+            && let Some(r) = self.tip_slot.and_then(|i| self.panel_tooltip_rect(i))
+        {
+            let s = self.scale;
+            let x = ((r.x - 2.0) * s).floor() as i32;
+            let y = ((r.y - 2.0) * s).floor() as i32;
+            rects.push((x, y, ((r.right() + 2.0) * s).ceil() as i32 - x, ((r.bottom() + 2.0) * s).ceil() as i32 - y));
+        }
+        if rects != self.last_region
+            && let Some(region) = region_from(&rects)
+        {
+            self.last_region = rects;
+            let _ = unsafe { SetWindowRgn(self.content, Some(region), true) };
+        }
+    }
+
+    /// 패널에서 말풍선을 띄울 칸 (마우스가 올라간 항목·＋)
+    fn panel_tooltip(&self) -> Option<usize> {
+        if self.drag.is_some() {
+            return None;
+        }
+        match self.hover_hit {
+            Hit::Tile(i) => Some(i),
+            Hit::Add => Some(self.tiles.len()),
+            _ => None,
+        }
     }
 
     /// 지금 항목들 중 가장 긴 말풍선 폭 (DIP, 작업 영역 폭을 넘지 않게)
@@ -617,11 +675,6 @@ impl Panel {
             Mode::Panel => {
                 let hover: Vec<f32> = self.hover.iter().map(|a| a.value).collect();
                 let drag = self.drag.map(|(from, pos)| DragView { from, to: self.layout.drop_index(pos), pos });
-                let tooltip = match self.hover_hit {
-                    Hit::Tile(i) if self.drag.is_none() && hover.get(i).copied().unwrap_or(0.0) > 0.5 => Some(i),
-                    Hit::Add if hover.last().copied().unwrap_or(0.0) > 0.5 => Some(self.tiles.len()),
-                    _ => None,
-                };
                 let state = SceneState {
                     layout: &self.layout,
                     palette: self.palette(),
@@ -631,11 +684,19 @@ impl Panel {
                     pressed,
                     menu_hover: self.hover_hit == Hit::Menu,
                     drag,
-                    tooltip,
                     drop_hover: self.drop_hover,
-                    px_scale: self.scale,
                 };
+                let side = self.panel_side as f32 / self.scale;
+                gfx.set_offset(side, 0.0);
                 scene::draw(gfx, &state);
+                gfx.set_offset(0.0, 0.0);
+                if self.tip.value > 0.0
+                    && let Some(i) = self.tip_slot
+                    && let Some(rect) = self.panel_tooltip_rect(i)
+                {
+                    let text = scene::panel_tooltip_text(&self.tiles, i);
+                    scene::draw_panel_tooltip(gfx, text, rect, self.tip.value, self.scale);
+                }
             }
             Mode::Dock => {
                 let m = self.dock_mag();
@@ -699,16 +760,22 @@ impl Panel {
             if self.dock.amount.value == 0.0 && self.dock.amount.target == 0.0 {
                 self.dock.pointer = None;
             }
-            let target = self.dock_tooltip();
-            if target.is_some() {
-                self.tip_slot = target;
-            }
-            self.tip.set(if target.is_some() { 1.0 } else { 0.0 });
-            moving |= self.tip.step(dt);
-            if self.tip.value == 0.0 && self.tip.target == 0.0 {
-                self.tip_slot = None;
-            }
-            self.update_dock_glass();
+        }
+        let target = match self.mode {
+            Mode::Dock => self.dock_tooltip(),
+            Mode::Panel => self.panel_tooltip(),
+        };
+        if target.is_some() {
+            self.tip_slot = target;
+        }
+        self.tip.set(if target.is_some() { 1.0 } else { 0.0 });
+        moving |= self.tip.step(dt);
+        if self.tip.value == 0.0 && self.tip.target == 0.0 {
+            self.tip_slot = None;
+        }
+        match self.mode {
+            Mode::Dock => self.update_dock_glass(),
+            Mode::Panel => self.update_panel_region(),
         }
         self.render();
         if moving {
@@ -1148,5 +1215,17 @@ impl Handler for Panel {
             _ => return None,
         }
         Some(LRESULT(if msg == WM_ERASEBKGND { 1 } else { 0 }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_side_room_only_when_tooltip_is_wider_than_the_panel() {
+        assert_eq!(panel_side_px(200.0, 360.0, 1.0), 0);
+        assert_eq!(panel_side_px(500.0, 360.0, 1.0), 78); // (500 + 16 - 360) / 2
+        assert_eq!(panel_side_px(500.0, 360.0, 2.0), 156);
     }
 }

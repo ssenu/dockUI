@@ -60,12 +60,8 @@ pub struct SceneState<'a> {
     pub pressed: Option<usize>,
     pub menu_hover: bool,
     pub drag: Option<DragView>,
-    /// 말풍선을 띄울 칸 번호
-    pub tooltip: Option<usize>,
     /// 끌어 놓을 수 있는 것이 위에 있음 (강조 테두리)
     pub drop_hover: bool,
-    /// DIP → 실제 픽셀 배율 (말풍선 픽셀 맞춤)
-    pub px_scale: f32,
 }
 
 /// 문자열에서 앞 두 글자 (배지용)
@@ -238,17 +234,26 @@ fn draw_tooltip_box(g: &Gfx, text: &str, r: RectF, alpha: f32, scale: f32) {
     g.text(text, inner, 12.0, Weight::SemiBold, Align::Center, TOOLTIP_TEXT.with_alpha(alpha));
 }
 
-/// 아이콘 위에 말풍선을 띄운다. 위쪽이 `top_limit`보다 올라가면(헤더를 가리면) 아래에 띄운다.
-fn draw_tooltip(g: &Gfx, text: &str, anchor: RectF, bounds: (f32, f32), top_limit: f32, scale: f32) {
-    let (w, h) = tooltip_size(g, text, bounds.0);
-    let mut x = anchor.center().x - w / 2.0;
-    x = x.clamp(6.0, (bounds.0 - w - 6.0).max(6.0));
+/// 패널 말풍선 사각형 (콘텐츠 창 기준 DIP): 아이콘 위 가운데, 한 줄. `left..right`는 그릴 수 있는 가로 범위
+/// (패널 밖까지 넓힌 콘텐츠 창), 위가 `top_limit`(머리글)보다 올라가면 아이콘 아래에 띄운다.
+pub fn panel_tooltip_rect(g: &Gfx, text: &str, anchor: RectF, left: f32, right: f32, top_limit: f32) -> RectF {
+    let (w, h) = tooltip_size(g, text, right - left - 8.0);
+    let x = (anchor.center().x - w / 2.0).clamp(left + 4.0, (right - w - 4.0).max(left + 4.0));
     let mut y = anchor.y - h - 8.0;
     if y < top_limit {
         y = anchor.bottom() + 8.0;
     }
-    let r = RectF::new(x, y, w, h);
-    draw_tooltip_box(g, text, r, 1.0, scale);
+    RectF::new(x, y, w, h)
+}
+
+/// 패널 칸의 말풍선 글자
+pub fn panel_tooltip_text(tiles: &[TileView], cell: usize) -> &str {
+    tiles.get(cell).map_or("항목 추가", |t| t.label.as_str())
+}
+
+/// 패널 말풍선 그리기 (페이드 `alpha`, 픽셀 맞춤 `scale`)
+pub fn draw_panel_tooltip(g: &Gfx, text: &str, rect: RectF, alpha: f32, scale: f32) {
+    draw_tooltip_box(g, text, rect, alpha, scale);
 }
 
 /// 끌어 놓기 강조: 판 테두리를 강조색으로, 안쪽은 옅게
@@ -299,9 +304,6 @@ pub fn draw(g: &Gfx, s: &SceneState) {
         let cell = s.layout.cells[0];
         let r = RectF::new(d.pos.x - cell.w / 2.0, d.pos.y - cell.h / 2.0, cell.w, cell.h).scaled(1.1);
         draw_tile(g, &s.tiles[d.from], r, 2.0);
-    } else if let Some(i) = s.tooltip {
-        let text = if i < s.tiles.len() { s.tiles[i].label.as_str() } else { "항목 추가" };
-        draw_tooltip(g, text, s.layout.cells[i], (w, h), s.layout.header.bottom(), s.px_scale);
     }
 }
 
@@ -600,9 +602,12 @@ mod tests {
             kind: TileKind::Update,
             ..Default::default()
         });
+        tiles[1].label = "아침 뉴스 라이브 - 오늘의 주요 소식 모아 보기 (전체 재생목록)".into();
         let layout = PanelLayout::compute(360.0, 480.0, tiles.len());
+        // 패널보다 긴 말풍선이 패널 밖까지 나가는 모습: 콘텐츠 창을 좌우로 SIDE만큼 넓혀 그린다
+        const SIDE: f32 = 60.0;
         for theme in crate::ui::theme::PICKER_ORDER.iter() {
-            let gfx = Gfx::offscreen(360 * 2, 480 * 2, 2.0).unwrap();
+            let gfx = Gfx::offscreen(((360.0 + 2.0 * SIDE) * 2.0) as u32, 480 * 2, 2.0).unwrap();
             let mut hover = vec![0.0; tiles.len() + 1];
             hover[1] = 1.0;
             let state = SceneState {
@@ -614,12 +619,17 @@ mod tests {
                 pressed: None,
                 menu_hover: false,
                 drag: None,
-                tooltip: Some(1),
                 drop_hover: *theme == Theme::Glass,
-                px_scale: 2.0,
             };
             gfx.begin();
+            gfx.set_offset(SIDE, 0.0);
             draw(&gfx, &state);
+            gfx.set_offset(0.0, 0.0);
+            let cell = layout.cells[1];
+            let anchor = RectF::new(cell.x + SIDE, cell.y, cell.w, cell.h);
+            let text = panel_tooltip_text(&tiles, 1);
+            let rect = panel_tooltip_rect(&gfx, text, anchor, 0.0, 360.0 + 2.0 * SIDE, layout.header.bottom());
+            draw_panel_tooltip(&gfx, text, rect, 1.0, 2.0);
             gfx.end().unwrap();
             let path = dir.join(format!("panel-{}.png", crate::ui::theme::label(*theme)));
             gfx.save_png(&path).unwrap();
