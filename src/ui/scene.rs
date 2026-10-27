@@ -630,6 +630,46 @@ mod tests {
         }
     }
 
+    /// 사용자 지정 테마(밝은 색·어두운 색) 패널: 글자색이 바탕 밝기에 맞춰 바뀌는지 눈으로 확인
+    #[test]
+    fn renders_custom_theme_panel_snapshots() {
+        use crate::config::CustomTheme;
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("snapshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tiles = vec![TileView {
+            id: "1".into(),
+            label: "로파이 음악".into(),
+            badge: "로파".into(),
+            kind: TileKind::Youtube,
+            ..Default::default()
+        }];
+        let layout = PanelLayout::compute(300.0, 220.0, tiles.len());
+        for (name, color) in [("light", 0xF4ECD8), ("dark", 0x0F4C5C)] {
+            let gfx = Gfx::offscreen(600, 440, 2.0).unwrap();
+            let hover = vec![0.0; 2];
+            let state = SceneState {
+                layout: &layout,
+                palette: crate::ui::theme::custom_palette(&CustomTheme { color, opacity: 85, blur: false }),
+                acrylic: true,
+                tiles: &tiles,
+                hover: &hover,
+                pressed: None,
+                menu_hover: false,
+                drag: None,
+                drop_hover: false,
+            };
+            gfx.begin();
+            draw(&gfx, &state);
+            gfx.end().unwrap();
+            let path = dir.join(format!("panel-custom-{name}.png"));
+            gfx.save_png(&path).unwrap();
+            assert!(std::fs::metadata(&path).unwrap().len() > 1000);
+        }
+    }
+
     #[test]
     fn renders_dock_snapshots_for_bottom_and_left_edges() {
         const TIP: f32 = 560.0;

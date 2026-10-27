@@ -11,3 +11,5 @@ pub mod layout;
 pub mod panel;
 pub mod scene;
 pub mod theme;
+pub mod theme_dialog;
+pub mod theme_form;

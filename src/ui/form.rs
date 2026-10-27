@@ -19,14 +19,14 @@ const FIELD_RADIUS: f32 = 10.0;
 pub const EDIT_FONT: f32 = 14.0;
 const EDIT_H: f32 = 20.0;
 
-const BG: Color = Color::hex(0xFFFFFF, 1.0);
-const TEXT: Color = Color::hex(0x1F232B, 1.0);
-const SUBTEXT: Color = Color::hex(0x6B7280, 1.0);
-const LABEL: Color = Color::hex(0x374151, 1.0);
-const BORDER: Color = Color::hex(0xDADDE3, 1.0);
-const HAIRLINE: Color = Color::hex(0xECEEF1, 1.0);
-const SOFT: Color = Color::hex(0xF3F4F6, 1.0);
-const FOOTER: Color = Color::hex(0xF8F9FB, 1.0);
+pub(crate) const BG: Color = Color::hex(0xFFFFFF, 1.0);
+pub(crate) const TEXT: Color = Color::hex(0x1F232B, 1.0);
+pub(crate) const SUBTEXT: Color = Color::hex(0x6B7280, 1.0);
+pub(crate) const LABEL: Color = Color::hex(0x374151, 1.0);
+pub(crate) const BORDER: Color = Color::hex(0xDADDE3, 1.0);
+pub(crate) const HAIRLINE: Color = Color::hex(0xECEEF1, 1.0);
+pub(crate) const SOFT: Color = Color::hex(0xF3F4F6, 1.0);
+pub(crate) const FOOTER: Color = Color::hex(0xF8F9FB, 1.0);
 const SELECTED_BG: Color = Color::hex(0xFFF5F4, 1.0);
 
 pub const KINDS: [Kind; 4] = [Kind::Youtube, Kind::App, Kind::Web, Kind::Path];
@@ -272,7 +272,7 @@ fn draw_card(g: &Gfx, kind: Kind, r: RectF, selected: bool, hover: bool, disable
     }
 }
 
-fn draw_field(g: &Gfx, r: RectF, focused: bool, error: bool, hover: bool) {
+pub(crate) fn draw_field(g: &Gfx, r: RectF, focused: bool, error: bool, hover: bool) {
     let (border, width) = if error {
         (ACCENT, 1.5)
     } else if focused {
@@ -297,7 +297,7 @@ fn draw_field(g: &Gfx, r: RectF, focused: bool, error: bool, hover: bool) {
     );
 }
 
-fn draw_button(g: &Gfx, r: RectF, text: &str, primary: bool, hover: bool, pressed: bool) {
+pub(crate) fn draw_button(g: &Gfx, r: RectF, text: &str, primary: bool, hover: bool, pressed: bool) {
     if primary {
         let base = if pressed {
             ACCENT.shade(-0.18)

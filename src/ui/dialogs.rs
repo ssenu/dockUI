@@ -43,8 +43,8 @@ const SS_ENDELLIPSIS: u32 = 0x4000;
 const EM_SETCUEBANNER: u32 = 0x1501;
 const EN_SETFOCUS: u32 = 0x0100;
 const EN_KILLFOCUS: u32 = 0x0200;
-const EN_CHANGE: u32 = 0x0300;
-const WM_MOUSELEAVE: u32 = 0x02A3;
+pub(crate) const EN_CHANGE: u32 = 0x0300;
+pub(crate) const WM_MOUSELEAVE: u32 = 0x02A3;
 const ID_MAIN: i32 = 101;
 const ID_NAME: i32 = 102;
 const ID_PICK: i32 = 105;
@@ -185,11 +185,11 @@ pub fn window_text(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
-fn item(dialog: HWND, id: i32) -> HWND {
+pub(crate) fn item(dialog: HWND, id: i32) -> HWND {
     unsafe { GetDlgItem(Some(dialog), id) }.unwrap_or_default()
 }
 
-fn set_text(hwnd: HWND, text: &str) {
+pub(crate) fn set_text(hwnd: HWND, text: &str) {
     let _ = unsafe { SetWindowTextW(hwnd, &HSTRING::from(text)) };
 }
 
@@ -203,13 +203,13 @@ pub fn warn(owner: HWND, text: &str) {
     };
 }
 
-fn set_cue(edit: HWND, text: &str) {
+pub(crate) fn set_cue(edit: HWND, text: &str) {
     let wide = HSTRING::from(text);
     // SAFETY: 컨트롤이 글자를 복사해 둔다
     unsafe { SendMessageW(edit, EM_SETCUEBANNER, Some(WPARAM(1)), Some(LPARAM(wide.as_ptr() as isize))) };
 }
 
-fn invalidate(hwnd: HWND) {
+pub(crate) fn invalidate(hwnd: HWND) {
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 

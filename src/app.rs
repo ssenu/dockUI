@@ -3,7 +3,7 @@
 use crate::apps::{self, AppKey};
 use crate::autostart::{AutoStart, RegistryRun};
 use crate::chrome;
-use crate::config::{Config, DockEdge, LoadReport, Mode, Storage, Theme};
+use crate::config::{Config, CustomTheme, DockEdge, LoadReport, Mode, Storage, Theme};
 use crate::icons::{FETCH_ARG, icon_path, missing_icons};
 use crate::items::{Item, new_id, normalize_url};
 use crate::logging;
@@ -14,6 +14,7 @@ use crate::ui::drop::Dropped;
 use crate::ui::panel::{OpenSpec, Panel, PanelCmd, PanelHandle, UiEvent, initial_rect};
 use crate::ui::scene::{TileKind, TileView, badge_of};
 use crate::ui::theme::{self, PICKER_ORDER};
+use crate::ui::theme_dialog::custom_theme_dialog;
 use crate::updater::{self, Release, UreqHttp};
 use crate::win::instance::WM_APP_SHOW;
 use crate::win::menu::{MenuEntry, show_popup};
@@ -63,6 +64,8 @@ const CMD_SHOW: u32 = 20;
 const CMD_ADD: u32 = 23;
 /// 테마 고르기: CMD_THEME + PICKER_ORDER 번호
 const CMD_THEME: u32 = 40;
+const CMD_THEME_CUSTOM: u32 = 45;
+const CMD_THEME_EDIT: u32 = 46;
 const CMD_MODE_DOCK: u32 = 30;
 const CMD_MODE_PANEL: u32 = 31;
 const CMD_DOCK_EDIT: u32 = 36;
@@ -239,6 +242,21 @@ fn update_tile(version: &str, downloading: bool, progress: Option<u8>) -> TileVi
         (false, _) => (format!("새 버전 v{version} 설치"), format!("v{version}")),
     };
     TileView { id: UPDATE_TILE_ID.to_string(), label, badge, kind: TileKind::Update, ..Default::default() }
+}
+
+/// 테마 하위 메뉴 (순수 함수): 내장 테마 넷, 구분선, 사용자 지정과 그 설정
+fn theme_entries(current: Theme) -> Vec<MenuEntry> {
+    let mut entries: Vec<MenuEntry> = PICKER_ORDER
+        .iter()
+        .enumerate()
+        .map(|(i, t)| MenuEntry::checked(CMD_THEME + i as u32, theme::label(*t), *t == current))
+        .collect();
+    entries.extend([
+        MenuEntry::Separator,
+        MenuEntry::checked(CMD_THEME_CUSTOM, theme::label(Theme::Custom), current == Theme::Custom),
+        MenuEntry::item(CMD_THEME_EDIT, "사용자 지정 설정…"),
+    ]);
+    entries
 }
 
 /// 모드 부분 메뉴 (순수 함수): 독 모드 아래에는 독 수정 모드만, 패널 모드면 위치 초기화·잠금.
@@ -570,6 +588,7 @@ impl App {
             tiles: self.tiles(),
             dock_offset: self.config.dock_offset,
             dock_size: self.config.dock_size,
+            custom_theme: self.config.custom_theme,
         };
         match Panel::open(spec, notify) {
             Ok(handle) => self.panel = Some(handle),
@@ -738,7 +757,32 @@ impl App {
     fn set_theme(&mut self, theme: Theme) {
         self.config.theme = theme;
         self.save();
+        if theme == Theme::Custom {
+            self.panel_send(PanelCmd::SetCustomTheme(self.config.custom_theme));
+        }
         self.panel_send(PanelCmd::SetTheme(theme));
+    }
+
+    /// 사용자 지정 테마 설정 창: 바꿀 때마다 화면에 바로 보이고, 취소하면 열기 전 테마로 되돌린다
+    fn edit_custom_theme(&mut self) {
+        let (before_theme, before) = (self.config.theme, self.config.custom_theme);
+        let panel = self.panel.clone();
+        let preview = move |c: CustomTheme| {
+            if let Some(p) = &panel {
+                p.send(PanelCmd::SetCustomTheme(c));
+                p.send(PanelCmd::SetTheme(Theme::Custom));
+            }
+        };
+        match custom_theme_dialog(self.dialog_owner(), before, std::rc::Rc::new(preview)) {
+            Some(c) => {
+                self.config.custom_theme = c;
+                self.set_theme(Theme::Custom);
+            }
+            None => {
+                self.panel_send(PanelCmd::SetCustomTheme(before));
+                self.panel_send(PanelCmd::SetTheme(before_theme));
+            }
+        }
     }
 
     fn check_updates(&self, manual: bool) {
@@ -837,14 +881,7 @@ impl App {
             MenuEntry::Separator,
             MenuEntry::item(CMD_SHOW, "런처 보이기"),
             MenuEntry::item(CMD_ADD, "항목 추가…"),
-            MenuEntry::submenu(
-                "테마",
-                PICKER_ORDER
-                    .iter()
-                    .enumerate()
-                    .map(|(i, t)| MenuEntry::checked(CMD_THEME + i as u32, theme::label(*t), *t == self.config.theme))
-                    .collect(),
-            ),
+            MenuEntry::submenu("테마", theme_entries(self.config.theme)),
             MenuEntry::Separator,
         ];
         entries.extend(mode_entries(dock, self.dock_editing, self.config.locked));
@@ -876,6 +913,8 @@ impl App {
             id if (CMD_THEME..CMD_THEME + PICKER_ORDER.len() as u32).contains(&id) => {
                 self.set_theme(PICKER_ORDER[(id - CMD_THEME) as usize]);
             }
+            CMD_THEME_CUSTOM => self.set_theme(Theme::Custom),
+            CMD_THEME_EDIT => self.edit_custom_theme(),
             CMD_MODE_DOCK => self.set_mode(Mode::Dock, self.config.dock_edge),
             CMD_MODE_PANEL => self.set_mode(Mode::Panel, self.config.dock_edge),
             CMD_DOCK_EDIT => {
@@ -1154,6 +1193,20 @@ mod tests {
         assert!(drop_message(0, 1, 1).contains("이미 있는 1개") && drop_message(0, 1, 1).contains("읽을 수 없는 1개"));
         let path = |p: &str| Item::Path { id: new_id(), path: p.into(), name: String::new() };
         assert!(same_target(&path("C:/A/b.txt"), &path("c:/a/B.TXT")));
+    }
+
+    #[test]
+    fn theme_menu_has_custom_entries() {
+        let texts: Vec<String> = theme_entries(Theme::Custom)
+            .into_iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item { text, checked, .. } => Some(format!("{text}{}", if checked { "✓" } else { "" })),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"사용자 지정✓".to_string()), "{texts:?}");
+        assert!(texts.iter().any(|t| t.starts_with("사용자 지정 설정")));
+        assert!(texts.contains(&"다크".to_string()));
     }
 
     #[test]
