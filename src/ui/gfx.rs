@@ -201,9 +201,21 @@ pub fn buffer_size(px: u32) -> u32 {
     px.max(1).div_ceil(256) * 256
 }
 
+thread_local! {
+    /// 내장 글꼴 모음은 (공유 DirectWrite 팩터리에) 스레드마다 한 번만 만든다.
+    /// 그리기 장치마다 새로 등록하면 글꼴 데이터(약 4.7MB)가 복사돼 풀리지 않고 쌓인다.
+    static FONTS: RefCell<Option<IDWriteFontCollection1>> = const { RefCell::new(None) };
+}
+
 fn text_resources() -> Result<(IDWriteFactory5, Option<IDWriteFontCollection1>)> {
     let dwrite: IDWriteFactory5 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-    let fonts = load_fonts(&dwrite).ok();
+    let fonts = FONTS.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if cached.is_none() {
+            *cached = load_fonts(&dwrite).ok();
+        }
+        cached.clone()
+    });
     Ok((dwrite, fonts))
 }
 
@@ -706,5 +718,45 @@ mod buffer_tests {
         assert_eq!(buffer_size(256), 256);
         assert_eq!(buffer_size(257), 512);
         assert_eq!(buffer_size(1000), 1024);
+    }
+}
+
+#[cfg(test)]
+mod memory_probe {
+    use super::*;
+
+    fn private_mb() -> f64 {
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("(Get-Process -Id {}).PrivateMemorySize64", std::process::id())])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().unwrap_or(0.0) / 1048576.0
+    }
+
+    /// 그리기 장치를 만들고 지울 때 메모리가 쌓이는지 잰다: `cargo test memory_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn gfx_create_drop_memory() {
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
+        };
+        let base = private_mb();
+        for i in 1..=10 {
+            let g = Gfx::offscreen(400, 300, 1.0).unwrap();
+            g.begin();
+            g.text(
+                "가나다 abc",
+                RectF::new(0.0, 0.0, 200.0, 30.0),
+                12.0,
+                Weight::SemiBold,
+                Align::Leading,
+                Color::hex(0, 1.0),
+            );
+            g.end().unwrap();
+            drop(g);
+            if i % 2 == 0 {
+                eprintln!("PROBE after {i} create/drop: +{:.1} MB", private_mb() - base);
+            }
+        }
     }
 }
