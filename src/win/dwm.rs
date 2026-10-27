@@ -7,7 +7,7 @@
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWINDOWATTRIBUTE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWMWINDOWATTRIBUTE,
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -30,12 +30,11 @@ const DWMWA_BORDER_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(34);
 const COLOR_NONE: u32 = 0xFFFF_FFFE;
 const COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
 
-/// 창 외곽: 패널은 둥근 모서리 + 기본 테두리, 독은 모서리·테두리 없음
-/// (독 흐림 창은 가장 커졌을 때 크기로 고정해 두므로 그 외곽선이 보이면 안 된다)
-pub fn set_frame(hwnd: HWND, panel: bool) {
-    let corner: DWM_WINDOW_CORNER_PREFERENCE = if panel { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
+/// 창 외곽: 둥근 모서리는 늘 켜고(판 모서리와 맞춤), 테두리선은 `border`일 때만 (독은 끈다)
+pub fn set_frame(hwnd: HWND, border: bool) {
+    let corner: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
     set_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner);
-    set_attr(hwnd, DWMWA_BORDER_COLOR, &(if panel { COLOR_DEFAULT } else { COLOR_NONE }));
+    set_attr(hwnd, DWMWA_BORDER_COLOR, &(if border { COLOR_DEFAULT } else { COLOR_NONE }));
 }
 
 /// 블러 배경의 밝기 톤 (어두운 테마면 true)
@@ -119,7 +118,8 @@ mod tests {
         GetStockObject, HBRUSH, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject, SetWindowRgn,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, SW_SHOWNOACTIVATE, ShowWindow,
+        DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+        SWP_NOCOPYBITS, SWP_NOOWNERZORDER, SWP_NOSENDCHANGING, SWP_NOZORDER, SetWindowPos, ShowWindow,
         TranslateMessage, WM_PAINT, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
@@ -200,7 +200,7 @@ mod tests {
     fn blur_region_probe() {
         let (x0, y0, w, h) = (300, 200, 100, 400);
         let mut wins = Vec::new();
-        for i in 0..2 {
+        for i in 0..3 {
             let spec = WindowSpec {
                 class: "DockUIBlurProbe",
                 title: "probe",
@@ -217,16 +217,28 @@ mod tests {
         }
         pump(300);
         // 아래 60px을 잘라낸 둥근 판 모양: 왼쪽은 다시 그리기 없이, 오른쪽은 다시 그리기와 함께
-        for (i, hwnd) in wins.iter().enumerate() {
+        for (i, hwnd) in wins.iter().take(2).enumerate() {
             unsafe {
                 let rgn = CreateRoundRectRgn(0, 20, w + 1, h - 60 + 1, 16, 16);
                 let _ = SetWindowRgn(*hwnd, Some(rgn), i == 1);
             }
         }
+        // 세 번째: 영역 대신 창 크기 자체를 같은 판 크기로 줄인다 (독이 쓰는 방식)
+        let _ = unsafe {
+            SetWindowPos(
+                wins[2],
+                None,
+                x0 + 320,
+                y0 + 20,
+                w,
+                h - 80,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING | SWP_NOCOPYBITS,
+            )
+        };
         pump(500);
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("snapshots");
         std::fs::create_dir_all(&dir).unwrap();
-        capture_bmp(x0 - 20, y0 - 20, 320, h + 40, &dir.join("blur-probe.bmp"));
+        capture_bmp(x0 - 20, y0 - 20, 480, h + 40, &dir.join("blur-probe.bmp"));
         for hwnd in wins {
             let _ = unsafe { DestroyWindow(hwnd) };
         }
