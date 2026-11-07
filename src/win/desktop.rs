@@ -1,13 +1,13 @@
 //! 바탕화면 위젯 동작: 바탕화면에 붙이기, 맨 아래로 보내기, 모니터 작업 영역, DPI.
 
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWLP_HWNDPARENT, HWND_BOTTOM, MONITORINFOF_PRIMARY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SetWindowLongPtrW, SetWindowPos,
+    FindWindowW, GWLP_HWNDPARENT, GetCursorPos, HWND_BOTTOM, MONITORINFOF_PRIMARY, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos,
 };
 use windows::core::{BOOL, w};
 
@@ -100,6 +100,16 @@ pub fn scale_for(hwnd: HWND) -> f32 {
     if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
 }
 
+/// 마우스 커서가 있는 모니터
+pub fn monitor_at_cursor() -> HMONITOR {
+    let mut pt = POINT::default();
+    // SAFETY: 커서 위치를 읽어 모니터를 찾는다
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+        MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +127,11 @@ mod tests {
         let primary: Vec<&Monitor> = all.iter().filter(|m| m.primary).collect();
         assert_eq!(primary.len(), 1);
         assert_eq!(primary[0].work, primary_work_area());
+    }
+
+    #[test]
+    fn cursor_is_on_a_known_monitor() {
+        let cursor = monitor_at_cursor();
+        assert!(monitors().iter().any(|m| m.handle == cursor));
     }
 }

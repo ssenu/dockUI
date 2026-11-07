@@ -31,11 +31,12 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, DestroyWindow, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, GA_ROOT, GetAncestor, IDYES, IsWindow,
     KillTimer, MB_ICONQUESTION, MB_YESNO, MessageBoxW, OBJID_WINDOW, PostMessageW, PostQuitMessage,
     RegisterWindowMessageW, SetTimer, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CONTEXTMENU,
-    WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
+    WM_DESTROY, WM_DISPLAYCHANGE, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::{HSTRING, w};
 
@@ -282,6 +283,10 @@ fn theme_entries(current: Theme) -> Vec<MenuEntry> {
 /// 화면(독·패널) 하나를 가리키는 번호. 닫힌 독에서 늦게 온 이벤트도 구분할 수 있게 다시 쓰지 않는다.
 pub type PanelId = u32;
 /// 주 패널 (주 모니터의 독, 패널 모드의 패널)
+/// 모니터 구성이 바뀐 뒤 보조 독을 다시 만드는 타이머 (연달아 오는 알림을 모은다)
+const TIMER_MONITORS: usize = 5;
+const MONITORS_DEBOUNCE_MS: u32 = 500;
+
 const MAIN_PANEL: PanelId = 0;
 
 /// 보조 모니터의 독
@@ -366,6 +371,25 @@ fn internet_shortcut_url(text: &str) -> Option<String> {
 }
 
 /// 같은 앱·같은 주소를 가리키는 항목인가 (순수 함수)
+/// 창들을 막아 둔 채 `f`를 부른다. 대화상자는 소유 창만 막으므로, 그대로 두면 다른 독의 클릭이 쌓였다가
+/// 대화상자를 닫을 때 한꺼번에 실행된다.
+fn with_disabled<R>(windows: &[HWND], f: impl FnOnce() -> R) -> R {
+    for hwnd in windows {
+        let _ = unsafe { EnableWindow(*hwnd, false) };
+    }
+    let result = f();
+    for hwnd in windows {
+        let _ = unsafe { EnableWindow(*hwnd, true) };
+    }
+    result
+}
+
+/// "런처 보이기"를 받을 독 (순수 함수): 커서가 있는 모니터의 독, 없으면 주 패널.
+/// 하나만 올린다. 비활성 알림은 마지막으로 활성화된 창에만 와서, 모두 올리면 나머지가 다른 창 위에 남는다.
+fn show_target(mirrors: &[(PanelId, HMONITOR)], cursor: HMONITOR) -> PanelId {
+    mirrors.iter().find(|(_, m)| *m == cursor).map_or(MAIN_PANEL, |(id, _)| *id)
+}
+
 fn same_target(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (Item::App { target: x, .. }, Item::App { target: y, .. }) => x.eq_ignore_ascii_case(y),
@@ -744,17 +768,29 @@ impl App {
         }
     }
 
-    fn dialog_owner(&self) -> HWND {
-        self.panel.as_ref().map(PanelHandle::owner).unwrap_or(self.hwnd)
+    fn dialog_owner(&self, from: PanelId) -> HWND {
+        self.handle_of(from).or(self.panel.as_ref()).map(PanelHandle::owner).unwrap_or(self.hwnd)
+    }
+
+    fn with_modal<R>(&self, f: impl FnOnce() -> R) -> R {
+        let windows: Vec<HWND> = self.panels().map(PanelHandle::owner).collect();
+        with_disabled(&windows, f)
+    }
+
+    fn show_dock(&self) {
+        let mirrors: Vec<(PanelId, HMONITOR)> = self.mirrors.iter().map(|m| (m.id, m.monitor)).collect();
+        if let Some(panel) = self.handle_of(show_target(&mirrors, desktop::monitor_at_cursor())) {
+            panel.send(PanelCmd::Show);
+        }
     }
 
     fn on_ui(&mut self, from: PanelId, event: UiEvent) {
         match event {
             UiEvent::TileClicked(id) if id == UPDATE_TILE_ID => self.install_update(),
             UiEvent::TileClicked(id) => self.open_item(&id),
-            UiEvent::AddRequested => self.add_item(),
-            UiEvent::EditRequested(id) => self.edit_item(&id),
-            UiEvent::DeleteRequested(id) => self.delete_item(&id),
+            UiEvent::AddRequested => self.add_item(from),
+            UiEvent::EditRequested(id) => self.edit_item(from, &id),
+            UiEvent::DeleteRequested(id) => self.delete_item(from, &id),
             UiEvent::Reordered(ids) => {
                 self.config.items = apply_order(&self.config.items, &ids);
                 self.save();
@@ -810,8 +846,9 @@ impl App {
         self.fetch_icons(added);
     }
 
-    fn add_item(&mut self) {
-        if let Some(input) = item_dialog(self.dialog_owner(), "항목 추가", &Initial::New) {
+    fn add_item(&mut self, from: PanelId) {
+        let owner = self.dialog_owner(from);
+        if let Some(input) = self.with_modal(|| item_dialog(owner, "항목 추가", &Initial::New)) {
             let item = item_from_input(new_id(), input);
             self.config.items.push(item.clone());
             self.save();
@@ -821,10 +858,11 @@ impl App {
         }
     }
 
-    fn edit_item(&mut self, id: &str) {
+    fn edit_item(&mut self, from: PanelId, id: &str) {
         let Some(index) = self.config.items.iter().position(|i| i.id() == id) else { return };
         let initial = Initial::Edit(input_of(&self.config.items[index]));
-        let Some(input) = item_dialog(self.dialog_owner(), "항목 수정", &initial) else { return };
+        let owner = self.dialog_owner(from);
+        let Some(input) = self.with_modal(|| item_dialog(owner, "항목 수정", &initial)) else { return };
         let item = item_from_input(id.to_string(), input);
         if icon_source_changed(&self.config.items[index], &item) {
             self.remove_icon(id);
@@ -837,12 +875,13 @@ impl App {
         self.fetch_icons(vec![item]);
     }
 
-    fn delete_item(&mut self, id: &str) {
+    fn delete_item(&mut self, from: PanelId, id: &str) {
         let Some(item) = self.config.items.iter().find(|i| i.id() == id) else { return };
         let text = HSTRING::from(format!("'{}' 항목을 삭제할까요?", item.display_name()));
-        let answer = unsafe {
-            MessageBoxW(Some(self.dialog_owner()), &text, &HSTRING::from(APP_NAME), MB_YESNO | MB_ICONQUESTION)
-        };
+        let owner = self.dialog_owner(from);
+        let answer = self.with_modal(|| unsafe {
+            MessageBoxW(Some(owner), &text, &HSTRING::from(APP_NAME), MB_YESNO | MB_ICONQUESTION)
+        });
         if answer == IDYES {
             self.config.items.retain(|i| i.id() != id);
             self.save();
@@ -926,7 +965,9 @@ impl App {
                 p.send(PanelCmd::SetTheme(Theme::Custom));
             }
         };
-        match custom_theme_dialog(self.dialog_owner(), before, std::rc::Rc::new(preview)) {
+        let owner = self.dialog_owner(MAIN_PANEL);
+        let chosen = self.with_modal(|| custom_theme_dialog(owner, before, std::rc::Rc::new(preview)));
+        match chosen {
             Some(c) => {
                 self.config.custom_theme = c;
                 self.set_theme(Theme::Custom);
@@ -976,8 +1017,9 @@ impl App {
             return;
         }
         let text = HSTRING::from(update_question(&release));
-        let answer =
-            unsafe { MessageBoxW(Some(self.hwnd), &text, &HSTRING::from(APP_NAME), MB_YESNO | MB_ICONQUESTION) };
+        let answer = self.with_modal(|| unsafe {
+            MessageBoxW(Some(self.hwnd), &text, &HSTRING::from(APP_NAME), MB_YESNO | MB_ICONQUESTION)
+        });
         if answer != IDYES {
             return;
         }
@@ -1067,8 +1109,8 @@ impl App {
 
     fn show_menu(&mut self) {
         match show_popup(self.hwnd, &self.menu_entries()) {
-            CMD_SHOW => self.panel_send(PanelCmd::Show),
-            CMD_ADD => self.add_item(),
+            CMD_SHOW => self.show_dock(),
+            CMD_ADD => self.add_item(MAIN_PANEL),
             id if (CMD_THEME..CMD_THEME + PICKER_ORDER.len() as u32).contains(&id) => {
                 self.set_theme(PICKER_ORDER[(id - CMD_THEME) as usize]);
             }
@@ -1164,7 +1206,11 @@ impl Handler for App {
                     }
                 }
             }
-            WM_APP_SHOW => self.panel_send(PanelCmd::Show),
+            WM_APP_SHOW => self.show_dock(),
+            WM_DISPLAYCHANGE => {
+                logging::info("모니터 구성 변경 알림");
+                unsafe { SetTimer(Some(hwnd), TIMER_MONITORS, MONITORS_DEBOUNCE_MS, None) };
+            }
             WM_TIMER => match wparam.0 {
                 TIMER_FIRST_CHECK => {
                     let _ = unsafe { KillTimer(Some(hwnd), TIMER_FIRST_CHECK) };
@@ -1175,6 +1221,11 @@ impl Handler for App {
                 TIMER_RUNNING | TIMER_RUNNING_LATE => {
                     let _ = unsafe { KillTimer(Some(hwnd), wparam.0) };
                     self.update_running();
+                }
+                TIMER_MONITORS => {
+                    let _ = unsafe { KillTimer(Some(hwnd), TIMER_MONITORS) };
+                    Self::log_monitors();
+                    self.sync_mirrors();
                 }
                 _ => return None,
             },
@@ -1482,5 +1533,33 @@ mod tests {
         assert!(!d.allow("x", t0 + Duration::from_millis(500)));
         assert!(d.allow("y", t0 + Duration::from_millis(500)));
         assert!(d.allow("x", t0 + Duration::from_millis(1200)));
+    }
+
+    #[test]
+    fn show_goes_to_the_dock_under_the_cursor() {
+        let (a, b) = (monitor(1, false).handle, monitor(2, false).handle);
+        let mirrors = [(5, a)];
+        assert_eq!(show_target(&mirrors, a), 5);
+        assert_eq!(show_target(&mirrors, b), MAIN_PANEL, "보조 독이 없는 모니터면 주 패널");
+        assert_eq!(show_target(&[], a), MAIN_PANEL);
+    }
+
+    struct Quiet;
+    impl Handler for Quiet {
+        fn handle(&mut self, _: HWND, _: u32, _: WPARAM, _: LPARAM) -> Option<LRESULT> {
+            None
+        }
+    }
+
+    #[test]
+    fn windows_are_disabled_only_during_the_call() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+        let a = crate::win::msg_window::create("YTLauncherTestModalA", Box::new(Quiet)).unwrap();
+        let b = crate::win::msg_window::create("YTLauncherTestModalB", Box::new(Quiet)).unwrap();
+        let during = with_disabled(&[a, b], || unsafe { (IsWindowEnabled(a).as_bool(), IsWindowEnabled(b).as_bool()) });
+        assert_eq!(during, (false, false));
+        assert!(unsafe { IsWindowEnabled(a) }.as_bool() && unsafe { IsWindowEnabled(b) }.as_bool());
+        let _ = unsafe { DestroyWindow(a) };
+        let _ = unsafe { DestroyWindow(b) };
     }
 }
