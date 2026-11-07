@@ -90,6 +90,8 @@ pub struct Config {
     pub custom_theme: CustomTheme,
     /// 패널 아이콘 크기 (DIP)
     pub panel_icon_size: u32,
+    /// 독을 모든 모니터에 띄운다 (독 모드에서만)
+    pub all_monitors: bool,
 }
 
 impl Default for Config {
@@ -110,6 +112,7 @@ impl Default for Config {
             dock_size: crate::ui::dock_layout::DEFAULT_SIZE,
             custom_theme: CustomTheme::default(),
             panel_icon_size: crate::ui::layout::ICON as u32,
+            all_monitors: true,
         }
     }
 }
@@ -296,6 +299,16 @@ mod tests {
         assert_eq!(back.panel_icon_size, 72);
         let old: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(old.panel_icon_size, 56);
+    }
+
+    #[test]
+    fn all_monitors_defaults_on_and_round_trips() {
+        assert!(Config::default().all_monitors);
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert!(old.all_monitors, "필드가 없는 기존 설정도 켜짐");
+        let c = Config { all_monitors: false, ..Config::default() };
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(!back.all_monitors);
     }
 
     #[test]

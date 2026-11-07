@@ -73,6 +73,7 @@ const CMD_PANEL_ICON: u32 = 50;
 const CMD_MODE_DOCK: u32 = 30;
 const CMD_MODE_PANEL: u32 = 31;
 const CMD_DOCK_EDIT: u32 = 36;
+const CMD_ALL_MONITORS: u32 = 37;
 const CMD_RESET_GEOMETRY: u32 = 21;
 const CMD_LOCK: u32 = 22;
 const CMD_AUTOSTART: u32 = 10;
@@ -276,12 +277,15 @@ fn theme_entries(current: Theme) -> Vec<MenuEntry> {
 
 /// 모드 부분 메뉴 (순수 함수): 독 모드 아래에는 독 수정 모드만, 패널 모드면 위치 초기화·잠금.
 /// 독 위치는 독 수정 모드에서 판을 끌어 바꾼다.
-fn mode_entries(dock: bool, editing: bool, locked: bool, panel_icon: u32) -> Vec<MenuEntry> {
+fn mode_entries(dock: bool, editing: bool, locked: bool, panel_icon: u32, all_monitors: bool) -> Vec<MenuEntry> {
     let mut entries = vec![
         MenuEntry::checked(CMD_MODE_DOCK, "독 모드", dock),
         MenuEntry::checked(CMD_DOCK_EDIT, "    독 수정 모드 (옮기기·크기·순서)", dock && editing),
-        MenuEntry::checked(CMD_MODE_PANEL, "패널 모드", !dock),
     ];
+    if dock {
+        entries.push(MenuEntry::checked(CMD_ALL_MONITORS, "    모든 모니터에 표시", all_monitors));
+    }
+    entries.push(MenuEntry::checked(CMD_MODE_PANEL, "패널 모드", !dock));
     if !dock {
         entries.extend([
             MenuEntry::item(CMD_RESET_GEOMETRY, "위치·크기 초기화"),
@@ -933,7 +937,13 @@ impl App {
             MenuEntry::submenu("테마", theme_entries(self.config.theme)),
             MenuEntry::Separator,
         ];
-        entries.extend(mode_entries(dock, self.dock_editing, self.config.locked, self.config.panel_icon_size));
+        entries.extend(mode_entries(
+            dock,
+            self.dock_editing,
+            self.config.locked,
+            self.config.panel_icon_size,
+            self.config.all_monitors,
+        ));
         entries.extend([
             MenuEntry::Separator,
             MenuEntry::checked(CMD_AUTOSTART, "윈도우 시작 시 실행", self.autostart.is_enabled()),
@@ -978,6 +988,10 @@ impl App {
                     self.set_mode(Mode::Dock, self.config.dock_edge);
                 }
                 self.panel_send(PanelCmd::SetEditing(on));
+            }
+            CMD_ALL_MONITORS => {
+                self.config.all_monitors = !self.config.all_monitors;
+                self.save();
             }
             CMD_RESET_GEOMETRY => self.panel_send(PanelCmd::ResetGeometry),
             CMD_LOCK => {
@@ -1272,7 +1286,7 @@ mod tests {
 
     #[test]
     fn panel_menu_has_icon_sizes_with_check() {
-        let entries = mode_entries(false, false, false, 72);
+        let entries = mode_entries(false, false, false, 72, true);
         let sub = entries.iter().find_map(|e| match e {
             MenuEntry::Submenu { text, entries } if text == "아이콘 크기" => Some(entries),
             _ => None,
@@ -1286,12 +1300,25 @@ mod tests {
             })
             .collect();
         assert_eq!(checked, vec!["크게 (72)"]);
-        assert!(!mode_entries(true, false, false, 72).iter().any(|e| matches!(e, MenuEntry::Submenu { .. })));
+        assert!(!mode_entries(true, false, false, 72, true).iter().any(|e| matches!(e, MenuEntry::Submenu { .. })));
+    }
+
+    #[test]
+    fn all_monitors_toggle_is_only_in_dock_mode() {
+        let checked = |entries: Vec<MenuEntry>| {
+            entries.into_iter().find_map(|e| match e {
+                MenuEntry::Item { text, checked, .. } if text.contains("모든 모니터") => Some(checked),
+                _ => None,
+            })
+        };
+        assert_eq!(checked(mode_entries(true, false, false, 56, true)), Some(true));
+        assert_eq!(checked(mode_entries(true, false, false, 56, false)), Some(false));
+        assert_eq!(checked(mode_entries(false, false, false, 56, true)), None);
     }
 
     #[test]
     fn dock_menu_has_edit_mode_but_no_edge_items() {
-        let texts: Vec<String> = mode_entries(true, false, false, 56)
+        let texts: Vec<String> = mode_entries(true, false, false, 56, true)
             .into_iter()
             .filter_map(|e| match e {
                 MenuEntry::Item { text, .. } => Some(text),
@@ -1300,7 +1327,7 @@ mod tests {
             .collect();
         assert!(texts.iter().any(|t| t.contains("독 수정 모드")));
         assert!(!texts.iter().any(|t| t.contains("독 위치")), "{texts:?}");
-        let panel = mode_entries(false, false, true, 56);
+        let panel = mode_entries(false, false, true, 56, true);
         assert!(panel.iter().any(|e| matches!(e, MenuEntry::Item { text, .. } if text.contains("위치 잠금"))));
     }
 
