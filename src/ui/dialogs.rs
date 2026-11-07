@@ -27,10 +27,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateWindowExW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, GetClientRect,
     GetDlgItem, GetMessageW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU, HTCAPTION, HTCLIENT, IDC_HAND,
-    IDCANCEL, IDOK, IsChild, IsDialogMessageW, LoadCursorW, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, NONCLIENTMETRICSW,
-    PostMessageW, PostQuitMessage, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SendMessageW, SetCursor,
-    SetForegroundWindow, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-    WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    IDCANCEL, IDOK, IsChild, IsDialogMessageW, IsWindow, LoadCursorW, MB_ICONWARNING, MB_OK, MSG, MessageBoxW,
+    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SendMessageW,
+    SetCursor, SetForegroundWindow, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_QUIT, WM_SETCURSOR, WM_SETFONT, WS_CAPTION, WS_CHILD,
     WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
@@ -623,7 +623,8 @@ pub fn run_modal(owner: HWND, dialog: HWND, focus: HWND, done: &dyn Fn() -> bool
         let _ = SetForegroundWindow(dialog);
         let _ = SetFocus(Some(focus));
         let mut msg = MSG::default();
-        while !done() {
+        // 소유 창이 밖에서 없어지면 대화상자도 함께 사라진다: 그때도 모달을 끝낸다
+        while !done() && IsWindow(Some(dialog)).as_bool() {
             if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 // WM_QUIT은 바깥 루프가 받도록 되돌려 놓는다
                 PostQuitMessage(msg.wParam.0 as i32);
@@ -901,6 +902,27 @@ mod tests {
         press_later(&[IDOK.0]);
         let folder = ItemInput::Path { path: r"C:\Users".into(), name: "사용자".into() };
         assert_eq!(item_dialog(owner, "항목 수정", &edit(folder.clone())), Some(folder));
+    }
+
+    #[test]
+    fn dialog_ends_when_owner_window_is_destroyed() {
+        let _guard = lock();
+        let owner = create("YTLauncherTestDialogOwner4", Box::new(Owner)).unwrap();
+        let owner_raw = owner.0 as isize;
+        std::thread::spawn(move || {
+            for _ in 0..100 {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                if let Ok(h) = unsafe { FindWindowW(&HSTRING::from(DIALOG_CLASS), None) }
+                    && !h.0.is_null()
+                {
+                    let owner = HWND(owner_raw as *mut _);
+                    let _ = unsafe { PostMessageW(Some(owner), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+                    return;
+                }
+            }
+        });
+        // 소유 창이 밖에서 없어지면 대화상자도 함께 사라지므로 멈추지 않고 돌아와야 한다
+        assert_eq!(item_dialog(owner, "항목 추가", &Initial::New), None);
     }
 
     #[test]

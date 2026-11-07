@@ -383,6 +383,11 @@ fn with_disabled<R>(windows: &[HWND], f: impl FnOnce() -> R) -> R {
     result
 }
 
+/// 모달 동안 막을 창 (순수 함수): 소유 창은 대화상자가 스스로 막으므로 뺀다.
+fn windows_to_block(windows: &[HWND], owner: HWND) -> Vec<HWND> {
+    windows.iter().copied().filter(|w| *w != owner).collect()
+}
+
 /// "런처 보이기"를 받을 독 (순수 함수): 커서가 있는 모니터의 독, 없으면 주 패널.
 /// 하나만 올린다. 비활성 알림은 마지막으로 활성화된 창에만 와서, 모두 올리면 나머지가 다른 창 위에 남는다.
 fn show_target(mirrors: &[(PanelId, HMONITOR)], cursor: HMONITOR) -> PanelId {
@@ -772,9 +777,11 @@ impl App {
         self.handle_of(from).or(self.panel.as_ref()).map(PanelHandle::owner).unwrap_or(self.hwnd)
     }
 
-    fn with_modal<R>(&self, f: impl FnOnce() -> R) -> R {
-        let windows: Vec<HWND> = self.panels().map(PanelHandle::owner).collect();
-        with_disabled(&windows, f)
+    /// 대화상자·확인 창을 띄우는 동안 소유 창을 뺀 모든 독을 막는다.
+    /// 소유 창은 `run_modal`과 `MessageBoxW`가 스스로 막고 되살린다 (미리 막으면 닫힐 때 활성 창이 다른 앱으로 넘어간다).
+    fn with_modal<R>(&self, owner: HWND, f: impl FnOnce() -> R) -> R {
+        let all: Vec<HWND> = self.panels().map(PanelHandle::owner).collect();
+        with_disabled(&windows_to_block(&all, owner), f)
     }
 
     fn show_dock(&self) {
@@ -848,7 +855,7 @@ impl App {
 
     fn add_item(&mut self, from: PanelId) {
         let owner = self.dialog_owner(from);
-        if let Some(input) = self.with_modal(|| item_dialog(owner, "항목 추가", &Initial::New)) {
+        if let Some(input) = self.with_modal(owner, || item_dialog(owner, "항목 추가", &Initial::New)) {
             let item = item_from_input(new_id(), input);
             self.config.items.push(item.clone());
             self.save();
@@ -862,7 +869,7 @@ impl App {
         let Some(index) = self.config.items.iter().position(|i| i.id() == id) else { return };
         let initial = Initial::Edit(input_of(&self.config.items[index]));
         let owner = self.dialog_owner(from);
-        let Some(input) = self.with_modal(|| item_dialog(owner, "항목 수정", &initial)) else { return };
+        let Some(input) = self.with_modal(owner, || item_dialog(owner, "항목 수정", &initial)) else { return };
         let item = item_from_input(id.to_string(), input);
         if icon_source_changed(&self.config.items[index], &item) {
             self.remove_icon(id);
@@ -879,7 +886,7 @@ impl App {
         let Some(item) = self.config.items.iter().find(|i| i.id() == id) else { return };
         let text = HSTRING::from(format!("'{}' 항목을 삭제할까요?", item.display_name()));
         let owner = self.dialog_owner(from);
-        let answer = self.with_modal(|| unsafe {
+        let answer = self.with_modal(owner, || unsafe {
             MessageBoxW(Some(owner), &text, &HSTRING::from(APP_NAME), MB_YESNO | MB_ICONQUESTION)
         });
         if answer == IDYES {
@@ -966,7 +973,7 @@ impl App {
             }
         };
         let owner = self.dialog_owner(MAIN_PANEL);
-        let chosen = self.with_modal(|| custom_theme_dialog(owner, before, std::rc::Rc::new(preview)));
+        let chosen = self.with_modal(owner, || custom_theme_dialog(owner, before, std::rc::Rc::new(preview)));
         match chosen {
             Some(c) => {
                 self.config.custom_theme = c;
@@ -1017,7 +1024,7 @@ impl App {
             return;
         }
         let text = HSTRING::from(update_question(&release));
-        let answer = self.with_modal(|| unsafe {
+        let answer = self.with_modal(self.hwnd, || unsafe {
             MessageBoxW(Some(self.hwnd), &text, &HSTRING::from(APP_NAME), MB_YESNO | MB_ICONQUESTION)
         });
         if answer != IDYES {
@@ -1267,6 +1274,15 @@ mod tests {
         assert!(mirror_monitors(Mode::Dock, false, &three).is_empty(), "꺼져 있으면 없음");
         assert!(mirror_monitors(Mode::Panel, true, &three).is_empty(), "패널 모드는 창 하나");
         assert!(mirror_monitors(Mode::Dock, true, &[monitor(1, true)]).is_empty(), "모니터 하나면 없음");
+    }
+
+    #[test]
+    fn modal_blocks_every_dock_except_the_owner() {
+        let hwnd = |n: usize| HWND(n as *mut _);
+        let (a, b, c) = (hwnd(1), hwnd(2), hwnd(3));
+        assert_eq!(windows_to_block(&[a, b, c], b), vec![a, c]);
+        assert_eq!(windows_to_block(&[a, b], hwnd(9)), vec![a, b], "소유 창이 독이 아니면 모두 막음");
+        assert!(windows_to_block(&[a], a).is_empty());
     }
 
     #[test]
