@@ -128,29 +128,43 @@ pub fn apps_folder_path(target: &str) -> String {
     format!("{APPS_FOLDER}\\{target}")
 }
 
+/// `dest` 옆 임시 파일에 쓰고, 성공했을 때만 `dest`로 옮긴다. 아이콘 캐시는 파일이 있으면 다시 받지 않으므로
+/// 쓰다 실패한 파일을 남기면 안 된다. `write`는 끝날 때 파일 핸들을 모두 놓아야 한다.
+pub fn write_via_temp(
+    dest: &Path,
+    write: impl FnOnce(&Path) -> windows::core::Result<()>,
+) -> windows::core::Result<()> {
+    let tmp = dest.with_extension("png.tmp");
+    let result = write(&tmp).and_then(|()| {
+        std::fs::rename(&tmp, dest).map_err(|e| windows::core::Error::new(windows::core::HRESULT(-1), e.to_string()))
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// 비트맵을 PNG로 저장하고 비트맵은 해제한다.
 pub fn save_bitmap_png(bitmap: HBITMAP, path: &Path) -> windows::core::Result<()> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     // SAFETY: WIC로 비트맵을 감싸 PNG로 쓴다
-    let result = unsafe {
-        (|| {
-            let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
-            let source = wic.CreateBitmapFromHBITMAP(bitmap, HPALETTE::default(), WICBitmapUseAlpha)?;
-            let stream = wic.CreateStream()?;
-            stream.InitializeFromFilename(&HSTRING::from(path.as_os_str()), GENERIC_WRITE.0)?;
-            let encoder = wic.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null())?;
-            encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
-            let mut frame = None;
-            encoder.CreateNewFrame(&mut frame, std::ptr::null_mut())?;
-            let frame = frame.ok_or_else(windows::core::Error::empty)?;
-            frame.Initialize(None)?;
-            frame.WriteSource(&source, std::ptr::null())?;
-            frame.Commit()?;
-            encoder.Commit()
-        })()
-    };
+    let result = write_via_temp(path, |tmp| unsafe {
+        let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let source = wic.CreateBitmapFromHBITMAP(bitmap, HPALETTE::default(), WICBitmapUseAlpha)?;
+        let stream = wic.CreateStream()?;
+        stream.InitializeFromFilename(&HSTRING::from(tmp.as_os_str()), GENERIC_WRITE.0)?;
+        let encoder = wic.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null())?;
+        encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
+        let mut frame = None;
+        encoder.CreateNewFrame(&mut frame, std::ptr::null_mut())?;
+        let frame = frame.ok_or_else(windows::core::Error::empty)?;
+        frame.Initialize(None)?;
+        frame.WriteSource(&source, std::ptr::null())?;
+        frame.Commit()?;
+        encoder.Commit()
+    });
     let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
     result
 }
@@ -232,5 +246,25 @@ mod tests {
         let ok = apps.iter().take(10).any(|a| save_item_icon(&apps_folder_path(&a.target), &path, 64));
         assert!(ok);
         assert!(std::fs::metadata(&path).unwrap().len() > 100);
+    }
+
+    #[test]
+    fn failed_write_leaves_no_file() {
+        let dir = std::env::temp_dir().join(format!("ytl-tmp-{}", crate::items::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.png");
+        let failed = write_via_temp(&dest, |tmp| {
+            std::fs::write(tmp, b"half").unwrap();
+            Err(windows::core::Error::empty())
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "대상도 임시 파일도 남지 않아야 한다");
+        write_via_temp(&dest, |tmp| {
+            std::fs::write(tmp, b"whole").unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"whole");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 }

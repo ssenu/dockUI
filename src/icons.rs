@@ -2,7 +2,7 @@
 
 use crate::items::{Item, authority_of};
 use crate::updater::{Http, UreqHttp};
-use crate::win::shell_items::{apps_folder_path, save_item_icon};
+use crate::win::shell_items::{apps_folder_path, save_item_icon, write_via_temp};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{E_INVALIDARG, GENERIC_WRITE};
@@ -142,6 +142,10 @@ pub fn save_image_png(bytes: &[u8], dest: &Path) -> windows::core::Result<()> {
     if let Some(dir) = dest.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    write_via_temp(dest, |tmp| encode_image_png(bytes, tmp))
+}
+
+fn encode_image_png(bytes: &[u8], dest: &Path) -> windows::core::Result<()> {
     // SAFETY: 메모리 스트림을 WIC로 디코드해 PNG로 다시 쓴다
     unsafe {
         let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
@@ -323,5 +327,22 @@ mod tests {
         assert!(std::fs::metadata(&dest).unwrap().len() > 100);
         let missing = std::env::temp_dir().join(format!("ytl-fav-{}.png", crate::items::new_id()));
         assert!(!save_favicon(&FakeHttp(HashMap::new()), "https://none.kr", &missing));
+    }
+
+    #[test]
+    fn broken_image_does_not_leave_a_cached_icon() {
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
+        };
+        let png = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png")).unwrap();
+        let cut = &png[..png.len() / 2];
+        let dir = std::env::temp_dir().join(format!("ytl-broken-{}", crate::items::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.png");
+        let saved = save_image_png(cut, &dest).is_ok();
+        // 잘린 그림을 디코더가 받아 주더라도 "성공했을 때만 파일이 있다"는 지켜야 한다
+        assert_eq!(saved, dest.exists());
+        let files = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(files, usize::from(saved), "임시 파일이 남으면 안 된다");
     }
 }
