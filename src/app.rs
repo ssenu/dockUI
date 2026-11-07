@@ -282,11 +282,11 @@ fn theme_entries(current: Theme) -> Vec<MenuEntry> {
 
 /// 화면(독·패널) 하나를 가리키는 번호. 닫힌 독에서 늦게 온 이벤트도 구분할 수 있게 다시 쓰지 않는다.
 pub type PanelId = u32;
-/// 주 패널 (주 모니터의 독, 패널 모드의 패널)
 /// 모니터 구성이 바뀐 뒤 보조 독을 다시 만드는 타이머 (연달아 오는 알림을 모은다)
 const TIMER_MONITORS: usize = 5;
 const MONITORS_DEBOUNCE_MS: u32 = 500;
 
+/// 주 패널 (주 모니터의 독, 패널 모드의 패널)
 const MAIN_PANEL: PanelId = 0;
 
 /// 보조 모니터의 독
@@ -370,7 +370,6 @@ fn internet_shortcut_url(text: &str) -> Option<String> {
     text.lines().find_map(|l| l.trim().strip_prefix("URL=")).map(|u| u.trim().to_string()).filter(|u| !u.is_empty())
 }
 
-/// 같은 앱·같은 주소를 가리키는 항목인가 (순수 함수)
 /// 창들을 막아 둔 채 `f`를 부른다. 대화상자는 소유 창만 막으므로, 그대로 두면 다른 독의 클릭이 쌓였다가
 /// 대화상자를 닫을 때 한꺼번에 실행된다.
 fn with_disabled<R>(windows: &[HWND], f: impl FnOnce() -> R) -> R {
@@ -390,6 +389,7 @@ fn show_target(mirrors: &[(PanelId, HMONITOR)], cursor: HMONITOR) -> PanelId {
     mirrors.iter().find(|(_, m)| *m == cursor).map_or(MAIN_PANEL, |(id, _)| *id)
 }
 
+/// 같은 앱·같은 주소를 가리키는 항목인가 (순수 함수)
 fn same_target(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (Item::App { target: x, .. }, Item::App { target: y, .. }) => x.eq_ignore_ascii_case(y),

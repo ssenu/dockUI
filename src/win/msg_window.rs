@@ -1,7 +1,7 @@
 //! 창 프로시저를 Rust 핸들러에 연결하는 공용 틀과 메시지 루프.
 //!
 //! 메뉴·메시지 상자·입력 창은 자체 메시지 루프를 돌리므로, 처리 도중 같은 창의 프로시저가 다시 불릴 수 있다.
-//! 이때 핸들러를 두 번 빌리지 않도록 `RefCell::try_borrow_mut`을 쓰고, 바쁠 때 온 앱 메시지(WM_APP 이상)는
+//! 이때 핸들러를 두 번 빌리지 않도록 `RefCell::try_borrow_mut`을 쓰고, 바쁠 때 온 앱 메시지(WM_APP 이상)와 화면 구성 변경 알림은
 //! 모아 두었다가 핸들러가 끝난 뒤 다시 큐에 넣는다.
 //!
 //! 핸들러 안에서 자기 창을 `DestroyWindow`하면 WM_DESTROY·WM_NCDESTROY가 핸들러가 빌려진 채로 들어온다.
@@ -14,7 +14,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
     GetMessageW, GetWindowLongPtrW, IDC_ARROW, LoadCursorW, MSG, PostMessageW, RegisterClassW, SetWindowLongPtrW,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_NCCREATE, WM_NCDESTROY, WNDCLASSW, WS_OVERLAPPED,
+    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_DISPLAYCHANGE, WM_NCCREATE, WM_NCDESTROY, WNDCLASSW,
+    WS_OVERLAPPED,
 };
 /// 마우스가 창을 떠났다는 알림 (Controls 모듈 상수를 쓰지 않으려고 값만 둔다)
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -58,7 +59,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let Ok(mut handler) = slot.handler.try_borrow_mut() else {
             // 앱 메시지와 마우스 나가기 알림은 미뤄 둔다. 나가기 알림을 버리면(예: 우클릭 메뉴가 떠 있는 동안
             // 마우스가 창을 벗어남) 창은 마우스가 아직 위에 있다고 믿고 마우스 오버 상태가 풀리지 않는다.
-            if (WM_APP..0xC000).contains(&msg) || msg == WM_MOUSELEAVE {
+            // 화면 구성 변경과 등록 메시지(TaskbarCreated)도 버리면 대화상자가 떠 있는 동안의 변화를 놓친다.
+            if msg >= WM_APP || msg == WM_MOUSELEAVE || msg == WM_DISPLAYCHANGE {
                 slot.deferred.borrow_mut().push((msg, wparam, lparam));
                 return LRESULT(0);
             }
@@ -238,5 +240,46 @@ mod tests {
         pump();
         assert_eq!(handled.get(), 1);
         assert_eq!(drops.get(), 1);
+    }
+
+    /// 처리 중에 온 알림 중 미뤄 둘 것을 기록한다
+    struct BusyRecorder {
+        nested: Vec<u32>,
+        seen: Rc<std::cell::RefCell<Vec<u32>>>,
+    }
+
+    impl Handler for BusyRecorder {
+        fn handle(&mut self, hwnd: HWND, msg: u32, _w: WPARAM, _l: LPARAM) -> Option<LRESULT> {
+            if msg == WM_APP {
+                for m in &self.nested {
+                    unsafe { SendMessageW(hwnd, *m, None, None) };
+                }
+                return Some(LRESULT(0));
+            }
+            if self.nested.contains(&msg) {
+                self.seen.borrow_mut().push(msg);
+                return Some(LRESULT(0));
+            }
+            None
+        }
+    }
+
+    #[test]
+    fn display_change_and_registered_messages_during_busy_handler_are_not_lost() {
+        let registered = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(windows::core::w!(
+                "YTLauncherTestRegistered"
+            ))
+        };
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let handler = BusyRecorder { nested: vec![WM_DISPLAYCHANGE, registered], seen: seen.clone() };
+        let hwnd = create("YTLauncherTestBusyRecorder", Box::new(handler)).unwrap();
+        unsafe { SendMessageW(hwnd, WM_APP, None, None) };
+        let mut msg = MSG::default();
+        while unsafe { PeekMessageW(&mut msg, Some(hwnd), 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe { DispatchMessageW(&msg) };
+        }
+        assert_eq!(*seen.borrow(), vec![WM_DISPLAYCHANGE, registered]);
+        let _ = unsafe { DestroyWindow(hwnd) };
     }
 }
