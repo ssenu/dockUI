@@ -17,7 +17,7 @@ use crate::ui::scene::{TileKind, TileView, badge_of};
 use crate::ui::theme::{self, PICKER_ORDER};
 use crate::ui::theme_dialog::custom_theme_dialog;
 use crate::updater::{self, Release, UreqHttp};
-use crate::win::desktop;
+use crate::win::desktop::{self, Monitor, PxRect};
 use crate::win::instance::WM_APP_SHOW;
 use crate::win::menu::{MenuEntry, show_popup};
 use crate::win::msg_window::Handler;
@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -90,7 +91,10 @@ pub enum Event {
     Downloaded(Result<PathBuf, String>),
     /// 업데이트 내려받기 진행률 (0..=100)
     Progress(u8),
-    Ui(UiEvent),
+    Ui {
+        from: PanelId,
+        event: UiEvent,
+    },
     Opened(chrome::Opened),
     /// 아이콘 캐시에 새 파일이 생김
     IconsReady,
@@ -275,7 +279,32 @@ fn theme_entries(current: Theme) -> Vec<MenuEntry> {
     entries
 }
 
-/// 모드 부분 메뉴 (순수 함수): 독 모드 아래에는 독 수정 모드만, 패널 모드면 위치 초기화·잠금.
+/// 화면(독·패널) 하나를 가리키는 번호. 닫힌 독에서 늦게 온 이벤트도 구분할 수 있게 다시 쓰지 않는다.
+pub type PanelId = u32;
+/// 주 패널 (주 모니터의 독, 패널 모드의 패널)
+const MAIN_PANEL: PanelId = 0;
+
+/// 보조 모니터의 독
+struct Mirror {
+    id: PanelId,
+    monitor: HMONITOR,
+    handle: PanelHandle,
+}
+
+/// 보조 독을 띄울 모니터 (순수 함수): 독 모드이고 켜져 있으면 주 모니터를 뺀 나머지
+pub fn mirror_monitors(mode: Mode, all_monitors: bool, monitors: &[Monitor]) -> Vec<HMONITOR> {
+    if mode != Mode::Dock || !all_monitors {
+        return Vec::new();
+    }
+    monitors.iter().filter(|m| !m.primary).map(|m| m.handle).collect()
+}
+
+/// 변경을 전달할 독 (순수 함수): 보낸 독을 뺀 나머지
+pub fn relay_targets(from: PanelId, ids: &[PanelId]) -> Vec<PanelId> {
+    ids.iter().copied().filter(|id| *id != from).collect()
+}
+
+/// 모드 부분 메뉴 (순수 함수): 독 모드 아래에는 독 수정 모드와 모든 모니터 표시, 패널 모드면 위치 초기화·잠금.
 /// 독 위치는 독 수정 모드에서 판을 끌어 바꾼다.
 fn mode_entries(dock: bool, editing: bool, locked: bool, panel_icon: u32, all_monitors: bool) -> Vec<MenuEntry> {
     let mut entries = vec![
@@ -417,6 +446,9 @@ pub struct App {
     config: Config,
     tray: Option<Tray>,
     panel: Option<PanelHandle>,
+    /// 보조 모니터의 독들
+    mirrors: Vec<Mirror>,
+    next_panel_id: PanelId,
     autostart: AutoStart<RegistryRun>,
     release: Option<Release>,
     downloading: bool,
@@ -448,6 +480,8 @@ impl App {
             config,
             tray: None,
             panel: None,
+            mirrors: Vec::new(),
+            next_panel_id: MAIN_PANEL + 1,
             autostart: AutoStart { backend: RegistryRun::default() },
             release: None,
             downloading: false,
@@ -476,9 +510,28 @@ impl App {
         }
     }
 
+    fn panels(&self) -> impl Iterator<Item = &PanelHandle> {
+        self.panel.iter().chain(self.mirrors.iter().map(|m| &m.handle))
+    }
+
     fn panel_send(&self, cmd: PanelCmd) {
-        if let Some(panel) = &self.panel {
-            panel.send(cmd);
+        for panel in self.panels() {
+            panel.send(cmd.clone());
+        }
+    }
+
+    fn handle_of(&self, id: PanelId) -> Option<&PanelHandle> {
+        if id == MAIN_PANEL { self.panel.as_ref() } else { self.mirrors.iter().find(|m| m.id == id).map(|m| &m.handle) }
+    }
+
+    /// 보낸 독을 뺀 나머지에 명령을 보낸다
+    fn relay(&self, from: PanelId, cmd: PanelCmd) {
+        let mut ids: Vec<PanelId> = self.mirrors.iter().map(|m| m.id).collect();
+        ids.push(MAIN_PANEL);
+        for id in relay_targets(from, &ids) {
+            if let Some(panel) = self.handle_of(id) {
+                panel.send(cmd.clone());
+            }
         }
     }
 
@@ -585,6 +638,7 @@ impl App {
         Self::log_monitors();
         self.update_running_silently();
         self.open_panel();
+        self.sync_mirrors();
         self.watch_windows(hwnd);
         self.fetch_icons(self.config.items.clone());
         for notice in std::mem::take(&mut self.pending_notices) {
@@ -597,7 +651,6 @@ impl App {
         unsafe { SetTimer(Some(hwnd), TIMER_FIRST_CHECK, FIRST_CHECK_MS, None) };
     }
 
-    /// 화면을 열기 전 첫 계산 (화면에 보낼 곳이 아직 없다)
     /// 탐색기가 다시 시작됨: 소유자(Progman)가 사라져 독 창이 없어졌으면 다시 열고, 살아 있으면 소유자를 다시 지정한다.
     fn on_shell_restart(&mut self) {
         let alive = self.panel.as_ref().is_some_and(|p| unsafe { IsWindow(Some(p.owner())) }.as_bool());
@@ -608,6 +661,8 @@ impl App {
             self.panel = None;
             self.open_panel();
         }
+        // 보조 독도 소유자를 잃었을 수 있다
+        self.sync_mirrors();
     }
 
     fn log_monitors() {
@@ -616,6 +671,7 @@ impl App {
         }
     }
 
+    /// 화면을 열기 전 첫 계산 (화면에 보낼 곳이 아직 없다)
     fn update_running_silently(&mut self) {
         let keys = app_keys(&self.config.items);
         if keys.iter().any(Option::is_some) {
@@ -625,13 +681,11 @@ impl App {
         }
     }
 
-    fn open_panel(&mut self) {
-        let send = self.post_event();
-        let notify = Box::new(move |e: UiEvent| send(Event::Ui(e)));
-        let spec = OpenSpec {
+    fn panel_spec(&self, monitor: Option<HMONITOR>, panel_rect: PxRect) -> OpenSpec {
+        OpenSpec {
             mode: self.config.mode,
             edge: self.config.dock_edge,
-            panel_rect: initial_rect(self.config.panel_window),
+            panel_rect,
             theme: self.config.theme,
             locked: self.config.locked,
             tiles: self.tiles(),
@@ -639,12 +693,44 @@ impl App {
             dock_size: self.config.dock_size,
             custom_theme: self.config.custom_theme,
             panel_icon_size: self.config.panel_icon_size,
-            monitor: None,
-            editing: false,
-        };
-        match Panel::open(spec, notify) {
+            monitor,
+            editing: self.dock_editing,
+        }
+    }
+
+    fn open_view(&self, id: PanelId, spec: OpenSpec) -> windows::core::Result<PanelHandle> {
+        let send = self.post_event();
+        Panel::open(spec, Box::new(move |event: UiEvent| send(Event::Ui { from: id, event })))
+    }
+
+    fn open_panel(&mut self) {
+        let spec = self.panel_spec(None, initial_rect(self.config.panel_window));
+        match self.open_view(MAIN_PANEL, spec) {
             Ok(handle) => self.panel = Some(handle),
             Err(e) => logging::error(&format!("패널 창을 만들지 못했습니다: {e}")),
+        }
+    }
+
+    /// 보조 독을 닫는다
+    fn close_mirrors(&mut self) {
+        for mirror in self.mirrors.drain(..) {
+            mirror.handle.send(PanelCmd::Close);
+        }
+    }
+
+    /// 보조 독을 지금 설정·모니터에 맞게 다시 만든다. 실패한 모니터는 건너뛰고 다음 동기화 때 다시 시도한다.
+    fn sync_mirrors(&mut self) {
+        self.close_mirrors();
+        for monitor in mirror_monitors(self.config.mode, self.config.all_monitors, &desktop::monitors()) {
+            // 창이 처음부터 그 모니터에서 만들어져야 올바른 배율을 읽는다. 크기는 독을 놓을 때 정해진다
+            let (x, y, ..) = desktop::work_area_of(monitor);
+            let spec = self.panel_spec(Some(monitor), (x, y, 200, 200));
+            let id = self.next_panel_id;
+            self.next_panel_id += 1;
+            match self.open_view(id, spec) {
+                Ok(handle) => self.mirrors.push(Mirror { id, monitor, handle }),
+                Err(e) => logging::warn(&format!("보조 독을 만들지 못했습니다: {e}")),
+            }
         }
     }
 
@@ -662,7 +748,7 @@ impl App {
         self.panel.as_ref().map(PanelHandle::owner).unwrap_or(self.hwnd)
     }
 
-    fn on_ui(&mut self, event: UiEvent) {
+    fn on_ui(&mut self, from: PanelId, event: UiEvent) {
         match event {
             UiEvent::TileClicked(id) if id == UPDATE_TILE_ID => self.install_update(),
             UiEvent::TileClicked(id) => self.open_item(&id),
@@ -672,6 +758,7 @@ impl App {
             UiEvent::Reordered(ids) => {
                 self.config.items = apply_order(&self.config.items, &ids);
                 self.save();
+                self.refresh_tiles();
             }
             UiEvent::GeometryChanged(rect) => {
                 self.config.panel_window = Some(rect);
@@ -679,14 +766,22 @@ impl App {
             }
             UiEvent::MenuRequested => self.show_menu(),
             UiEvent::Dropped(dropped) => self.add_dropped(dropped),
+            UiEvent::DockMoving { edge, offset } => {
+                let size = self.config.dock_size;
+                self.relay(from, PanelCmd::SetDockPlacement { edge, offset, size });
+            }
             UiEvent::DockChanged { edge, offset, size } => {
                 self.config.dock_edge = edge;
                 self.config.dock_offset = offset;
                 self.config.dock_size = size;
                 self.save();
+                self.relay(from, PanelCmd::SetDockPlacement { edge, offset, size });
             }
-            UiEvent::EditingChanged(on) => self.dock_editing = on,
-            UiEvent::DockMoving { .. } => {}
+            UiEvent::EditingChanged(on) => {
+                self.dock_editing = on;
+                // 같은 값이면 독이 무시하므로 되풀이되지 않는다
+                self.relay(from, PanelCmd::SetEditing(on));
+            }
         }
     }
 
@@ -804,7 +899,12 @@ impl App {
         self.config.mode = mode;
         self.config.dock_edge = edge;
         self.save();
-        self.panel_send(PanelCmd::SetMode(mode, edge));
+        // 보조 독은 패널로 바뀌면 안 되므로 먼저 닫는다
+        self.close_mirrors();
+        if let Some(panel) = &self.panel {
+            panel.send(PanelCmd::SetMode(mode, edge));
+        }
+        self.sync_mirrors();
     }
 
     fn set_theme(&mut self, theme: Theme) {
@@ -819,9 +919,9 @@ impl App {
     /// 사용자 지정 테마 설정 창: 바꿀 때마다 화면에 바로 보이고, 취소하면 열기 전 테마로 되돌린다
     fn edit_custom_theme(&mut self) {
         let (before_theme, before) = (self.config.theme, self.config.custom_theme);
-        let panel = self.panel.clone();
+        let panels: Vec<PanelHandle> = self.panels().cloned().collect();
         let preview = move |c: CustomTheme| {
-            if let Some(p) = &panel {
+            for p in &panels {
                 p.send(PanelCmd::SetCustomTheme(c));
                 p.send(PanelCmd::SetTheme(Theme::Custom));
             }
@@ -992,6 +1092,7 @@ impl App {
             CMD_ALL_MONITORS => {
                 self.config.all_monitors = !self.config.all_monitors;
                 self.save();
+                self.sync_mirrors();
             }
             CMD_RESET_GEOMETRY => self.panel_send(PanelCmd::ResetGeometry),
             CMD_LOCK => {
@@ -1047,7 +1148,7 @@ impl Handler for App {
                             self.refresh_tiles();
                         }
                         Event::Progress(_) => {}
-                        Event::Ui(ui) => self.on_ui(ui),
+                        Event::Ui { from, event } => self.on_ui(from, event),
                         Event::Opened(chrome::Opened::DefaultBrowser) if !self.config.chrome_notice_shown => {
                             self.config.chrome_notice_shown = true;
                             self.save();
@@ -1101,6 +1202,28 @@ impl Handler for App {
 mod tests {
     use super::*;
     use crate::updater::Asset;
+    use crate::win::desktop::Monitor;
+    use windows::Win32::Graphics::Gdi::HMONITOR;
+
+    fn monitor(n: usize, primary: bool) -> Monitor {
+        Monitor { handle: HMONITOR(n as *mut _), work: (0, 0, 100, 100), primary }
+    }
+
+    #[test]
+    fn mirrors_cover_every_other_monitor_in_dock_mode_only() {
+        let three = [monitor(1, false), monitor(2, true), monitor(3, false)];
+        assert_eq!(mirror_monitors(Mode::Dock, true, &three), vec![monitor(1, false).handle, monitor(3, false).handle]);
+        assert!(mirror_monitors(Mode::Dock, false, &three).is_empty(), "꺼져 있으면 없음");
+        assert!(mirror_monitors(Mode::Panel, true, &three).is_empty(), "패널 모드는 창 하나");
+        assert!(mirror_monitors(Mode::Dock, true, &[monitor(1, true)]).is_empty(), "모니터 하나면 없음");
+    }
+
+    #[test]
+    fn relay_skips_the_sender() {
+        assert_eq!(relay_targets(1, &[0, 1, 2]), vec![0, 2]);
+        assert_eq!(relay_targets(0, &[0]), Vec::<PanelId>::new());
+        assert_eq!(relay_targets(9, &[0, 1]), vec![0, 1]);
+    }
 
     fn release(version: &str, installable: bool) -> Release {
         let asset = Asset { name: "a".into(), url: "u".into(), size: 1 };
