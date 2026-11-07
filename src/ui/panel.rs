@@ -43,11 +43,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HTTOPLEFT, HTTOPRIGHT, HTTRANSPARENT, IDC_SIZEALL, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE, MINMAXINFO,
     PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSENDCHANGING,
     SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WA_INACTIVE, WINDOWPOS, WM_ACTIVATE, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZING, WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING,
-    WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
+    ShowWindow, WA_INACTIVE, WINDOWPOS, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
+    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZING, WM_TIMER, WM_WINDOWPOSCHANGED,
+    WM_WINDOWPOSCHANGING, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
 };
 
 /// 앱 → 화면 명령이 채널에 들어왔음을 알리는 메시지
@@ -374,6 +374,35 @@ impl Panel {
         Ok(handle)
     }
 
+    /// 저장할 지금 패널 사각형을 앱에 알린다
+    fn emit_panel_rect(&self) {
+        let (x, y, w, h) = self.panel_rect;
+        self.emit(UiEvent::GeometryChanged(Rect { x, y, w, h }));
+    }
+
+    /// 패널이 모든 아이콘을 보여 주는 높이보다 작으면 늘리고 저장한다. 늘렸으면 true (창은 부른 쪽이 옮긴다).
+    fn ensure_panel_height(&mut self) -> bool {
+        let w = self.panel_rect.2 as f32 / self.scale;
+        let min = (PanelLayout::min_height(w, self.tiles.len(), self.panel_icon) * self.scale).ceil() as i32;
+        if self.panel_rect.3 >= min {
+            return false;
+        }
+        self.panel_rect.3 = min;
+        self.emit_panel_rect();
+        true
+    }
+
+    /// 마우스 캡처를 잃음 (끌던 중 Alt+Tab 등). 눌림 상태가 남으면 마우스 오버가 풀리지 않는다.
+    /// 우리가 부른 `ReleaseCapture`의 알림은 재진입 방어에 막혀 여기로 오지 않는다.
+    fn on_capture_lost(&mut self) {
+        self.press = None;
+        self.drag = None;
+        if self.dock.moving.take().is_some() {
+            self.emit_dock_changed();
+        }
+        self.render();
+    }
+
     fn init(&mut self) {
         let rect = screen_rect(self.glass);
         desktop::pin_to_desktop(self.glass);
@@ -398,6 +427,9 @@ impl Panel {
                 }
             }
             Err(e) => logging::error(&format!("콘텐츠 창을 만들지 못했습니다: {e}")),
+        }
+        if self.mode == Mode::Panel {
+            self.ensure_panel_height();
         }
         self.place_windows();
         // 콘텐츠 창이 유리 창을 덮고 있어 다른 프로세스에서 끌어 오면 콘텐츠 창이 놓을 곳이 된다: 둘 다 등록
@@ -1143,11 +1175,7 @@ impl Panel {
                     Mode::Dock => self.place_windows(),
                     Mode::Panel => {
                         // 항목이 늘어 아래 줄이 가려지면 패널을 그만큼 늘린다
-                        let min = (PanelLayout::min_height(self.layout.width, self.tiles.len(), self.panel_icon)
-                            * self.scale)
-                            .ceil() as i32;
-                        if self.panel_rect.3 < min {
-                            self.panel_rect.3 = min;
+                        if self.ensure_panel_height() {
                             self.place_windows();
                         }
                     }
@@ -1172,10 +1200,7 @@ impl Panel {
                     PanelLayout::compute(self.layout.width, self.layout.height, self.tiles.len(), self.panel_icon);
                 if self.mode == Mode::Panel {
                     // 아이콘이 커져 아래 줄이 가려지면 패널을 그만큼 늘린다
-                    let min = (PanelLayout::min_height(self.layout.width, self.tiles.len(), self.panel_icon)
-                        * self.scale)
-                        .ceil() as i32;
-                    self.panel_rect.3 = self.panel_rect.3.max(min);
+                    self.ensure_panel_height();
                     self.place_windows();
                 }
                 self.render();
@@ -1205,6 +1230,9 @@ impl Panel {
                 self.dock.pointer = None;
                 self.dock.amount = Anim::at(0.0);
                 self.hover_hit = Hit::Empty;
+                if mode == Mode::Panel {
+                    self.ensure_panel_height();
+                }
                 self.place_windows();
                 self.render();
             }
@@ -1214,6 +1242,8 @@ impl Panel {
             PanelCmd::ResetGeometry => {
                 if self.mode == Mode::Panel {
                     self.panel_rect = default_panel_rect(desktop::primary_work_area(), self.scale);
+                    self.ensure_panel_height();
+                    self.emit_panel_rect();
                 }
                 self.place_windows();
                 self.render();
@@ -1275,6 +1305,7 @@ impl Handler for Panel {
                 let (x, y) = lparam_point(lparam);
                 self.on_button_up(self.local_point(x, y));
             }
+            WM_CAPTURECHANGED => self.on_capture_lost(),
             WM_RBUTTONUP => {
                 let (x, y) = lparam_point(lparam);
                 self.on_right_click(self.local_point(x, y));
@@ -1333,6 +1364,8 @@ impl Handler for Panel {
                     // SAFETY: lparam은 시스템이 제안한 새 창 사각형
                     let r = unsafe { &*(lparam.0 as *const RECT) };
                     move_window(hwnd, (r.left, r.top, r.right - r.left, r.bottom - r.top));
+                    self.relayout_panel();
+                    self.render();
                 }
             }
             WM_GETMINMAXINFO => {
@@ -1414,5 +1447,145 @@ mod tests {
         assert_eq!(panel_side_px(200.0, 360.0, 1.0), 0);
         assert_eq!(panel_side_px(500.0, 360.0, 1.0), 78); // (500 + 16 - 360) / 2
         assert_eq!(panel_side_px(500.0, 360.0, 2.0), 156);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, EnumThreadWindows, GW_OWNER, GetWindow, MSG, PM_REMOVE, PeekMessageW, SendMessageW,
+        TranslateMessage, WM_CAPTURECHANGED,
+    };
+    use windows::core::BOOL;
+
+    pub fn pump(ms: u64) {
+        let end = Instant::now() + std::time::Duration::from_millis(ms);
+        let mut msg = MSG::default();
+        while Instant::now() < end {
+            unsafe {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    pub fn tile(id: &str) -> TileView {
+        TileView { id: id.into(), label: id.into(), badge: "a".into(), kind: TileKind::Web, ..Default::default() }
+    }
+
+    pub fn spec(mode: Mode, rect: PxRect, tiles: usize) -> OpenSpec {
+        OpenSpec {
+            mode,
+            edge: DockEdge::Bottom,
+            panel_rect: rect,
+            theme: Theme::Glass,
+            locked: false,
+            tiles: (0..tiles).map(|i| tile(&i.to_string())).collect(),
+            custom_theme: CustomTheme::default(),
+            panel_icon_size: 56,
+            dock_offset: 0.5,
+            dock_size: 48,
+        }
+    }
+
+    pub fn open(spec: OpenSpec) -> (PanelHandle, Rc<RefCell<Vec<UiEvent>>>) {
+        let _ = unsafe { windows::Win32::System::Ole::OleInitialize(None) };
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let log = events.clone();
+        let handle = Panel::open(spec, Box::new(move |e| log.borrow_mut().push(e))).unwrap();
+        pump(100);
+        (handle, events)
+    }
+
+    pub fn close(handle: &PanelHandle) {
+        handle.send(PanelCmd::Close);
+        pump(50);
+    }
+
+    fn content_of(glass: HWND) -> HWND {
+        unsafe extern "system" fn find(h: HWND, l: LPARAM) -> BOOL {
+            // SAFETY: l은 아래에서 넘긴 (소유자, 결과) 포인터
+            let state = unsafe { &mut *(l.0 as *mut (HWND, HWND)) };
+            if unsafe { GetWindow(h, GW_OWNER) }.ok() == Some(state.0) {
+                state.1 = h;
+                return false.into();
+            }
+            true.into()
+        }
+        let mut state = (glass, HWND::default());
+        let _ = unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(find), LPARAM(&mut state as *mut _ as isize)) };
+        state.1
+    }
+
+    #[test]
+    fn losing_capture_while_moving_saves_and_clears_the_press() {
+        let (h, events) = open(spec(Mode::Dock, (0, 0, 200, 200), 1));
+        h.send(PanelCmd::SetEditing(true));
+        pump(50);
+        let glass = h.owner();
+        // 판 왼쪽 끝 여백(아이콘 밖)을 누르면 판 옮기기가 시작된다
+        unsafe {
+            SendMessageW(glass, WM_LBUTTONDOWN, None, Some(LPARAM((20 << 16) | 2)));
+            SendMessageW(glass, WM_CAPTURECHANGED, None, Some(LPARAM(0)));
+        }
+        pump(20);
+        assert!(events.borrow().iter().any(|e| matches!(e, UiEvent::DockChanged { .. })), "{:?}", events.borrow());
+        let _ = unsafe { ReleaseCapture() };
+        close(&h);
+    }
+
+    #[test]
+    fn reset_geometry_is_saved() {
+        let (h, events) = open(spec(Mode::Panel, (100, 100, 360, 480), 1));
+        h.send(PanelCmd::ResetGeometry);
+        pump(50);
+        assert!(events.borrow().iter().any(|e| matches!(e, UiEvent::GeometryChanged(_))), "{:?}", events.borrow());
+        close(&h);
+    }
+
+    #[test]
+    fn panel_relays_out_when_dpi_changes() {
+        let (h, _events) = open(spec(Mode::Panel, (100, 100, 360, 480), 1));
+        let glass = h.owner();
+        let content = content_of(glass);
+        assert!(!content.0.is_null());
+        let r = RECT { left: 100, top: 100, right: 900, bottom: 900 };
+        unsafe {
+            SendMessageW(
+                glass,
+                WM_DPICHANGED,
+                Some(WPARAM(192 | (192 << 16))),
+                Some(LPARAM(&r as *const RECT as isize)),
+            );
+        }
+        pump(20);
+        assert_eq!(screen_rect(content), (100, 100, 800, 800), "콘텐츠 창도 따라와야 한다");
+        close(&h);
+    }
+
+    #[test]
+    fn short_saved_panel_grows_at_start_and_is_saved() {
+        let (h, events) = open(spec(Mode::Panel, (100, 100, 300, 210), 40));
+        let grown = events.borrow().iter().any(|e| matches!(e, UiEvent::GeometryChanged(r) if r.h > 210));
+        assert!(grown, "{:?}", events.borrow());
+        assert!(screen_rect(h.owner()).3 > 210);
+        close(&h);
+    }
+
+    #[test]
+    fn switching_to_panel_applies_min_height() {
+        let (h, events) = open(spec(Mode::Dock, (100, 100, 300, 210), 40));
+        h.send(PanelCmd::SetMode(Mode::Panel, DockEdge::Bottom));
+        pump(50);
+        let grown = events.borrow().iter().any(|e| matches!(e, UiEvent::GeometryChanged(r) if r.h > 210));
+        assert!(grown, "{:?}", events.borrow());
+        close(&h);
     }
 }
