@@ -47,6 +47,13 @@ pub fn primary_work_area() -> PxRect {
     }
 }
 
+/// 이 모니터의 작업 영역. 모니터가 사라졌으면 주 모니터.
+pub fn work_area_of(monitor: HMONITOR) -> PxRect {
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: 구조체 크기를 넘겨 모니터 정보를 읽는다
+    if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() { rect_tuple(info.rcWork) } else { primary_work_area() }
+}
+
 /// 모니터 하나
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Monitor {

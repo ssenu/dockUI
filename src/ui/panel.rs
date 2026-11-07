@@ -29,7 +29,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, W
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BLACK_BRUSH, BeginPaint, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, FillRect, GetStockObject, HBRUSH,
-    HGDIOBJ, HRGN, PAINTSTRUCT, RGN_OR, ScreenToClient, SetWindowRgn,
+    HGDIOBJ, HMONITOR, HRGN, PAINTSTRUCT, RGN_OR, ScreenToClient, SetWindowRgn,
 };
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -103,6 +103,12 @@ pub enum PanelCmd {
     Dropped(Vec<Dropped>),
     /// 독 수정 모드 켜기/끄기
     SetEditing(bool),
+    /// 다른 독에서 바뀐 위치·크기를 맞춘다
+    SetDockPlacement {
+        edge: DockEdge,
+        offset: f32,
+        size: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +131,11 @@ pub enum UiEvent {
     },
     /// 독 수정 모드가 켜지거나 꺼짐 (트레이 메뉴 체크 표시)
     EditingChanged(bool),
+    /// 독 수정 모드에서 판을 끄는 중 (저장하지 않는다, 다른 독이 따라온다)
+    DockMoving {
+        edge: DockEdge,
+        offset: f32,
+    },
 }
 
 /// 처음 화면을 열 때 필요한 값
@@ -144,6 +155,10 @@ pub struct OpenSpec {
     pub dock_offset: f32,
     /// 독 아이콘 크기 (DIP)
     pub dock_size: u32,
+    /// 독을 놓을 모니터 (None = 주 모니터)
+    pub monitor: Option<HMONITOR>,
+    /// 독 수정 모드로 연다 (수정 중에 다시 만든 독)
+    pub editing: bool,
 }
 
 /// 앱이 화면에 명령을 보내는 손잡이
@@ -209,6 +224,7 @@ struct Dock {
 }
 
 pub struct Panel {
+    monitor: Option<HMONITOR>,
     glass: HWND,
     content: HWND,
     gfx: Option<Gfx>,
@@ -336,6 +352,7 @@ impl Panel {
             scale: 1.0,
             pinned: false,
             pin_retries: PIN_RETRIES,
+            monitor: spec.monitor,
             mode: spec.mode,
             layout: PanelLayout::compute(
                 spec.panel_rect.2 as f32,
@@ -344,7 +361,7 @@ impl Panel {
                 spec.panel_icon_size as f32,
             ),
             dock: Dock {
-                layout: DockLayout::compute(spec.edge, n, false),
+                layout: DockLayout::compute(spec.edge, n, spec.editing),
                 edge: spec.edge,
                 pointer: None,
                 amount: Anim::at(0.0),
@@ -352,7 +369,7 @@ impl Panel {
                 content_px: spec.panel_rect,
                 offset: spec.dock_offset,
                 size: spec.dock_size,
-                editing: false,
+                editing: spec.editing,
                 moving: None,
                 inside: false,
             },
@@ -682,13 +699,18 @@ impl Panel {
         scene::longest_tip(gfx, &labels)
     }
 
+    /// 독이 놓이는 모니터의 작업 영역
+    fn work_area(&self) -> PxRect {
+        self.monitor.map_or_else(desktop::primary_work_area, desktop::work_area_of)
+    }
+
     fn place_dock(&mut self) {
         // 말풍선 글자도 독 배율로 그려지므로 잰 폭이 그대로 독 DIP 폭이다
         let tip = self.longest_tip();
         let s = self.dock_scale();
+        let work = self.work_area();
         let d = &mut self.dock;
         d.layout = DockLayout::compute(d.edge, self.tiles.len(), d.editing);
-        let work = desktop::primary_work_area();
         let px = |v: f32| (v * s).round() as i32;
         let thick = px(dock_layout::THICK);
         let widest = px(d.layout.max_length());
@@ -809,7 +831,7 @@ impl Panel {
     fn move_dock(&mut self, grab: i32) {
         let mut pt = POINT::default();
         let _ = unsafe { GetCursorPos(&mut pt) };
-        let work = desktop::primary_work_area();
+        let work = self.work_area();
         let edge = dock_layout::nearest_edge(work, (pt.x, pt.y));
         let grab = if edge == self.dock.edge { grab } else { 0 };
         self.dock.edge = edge;
@@ -818,6 +840,7 @@ impl Panel {
         let layout = DockLayout::compute(edge, self.tiles.len(), self.dock.editing);
         let widest = (layout.max_length() * self.dock_scale()).round() as i32;
         self.dock.offset = dock_layout::offset_for(work, edge, widest, along);
+        self.emit(UiEvent::DockMoving { edge, offset: self.dock.offset });
         self.place_windows();
         self.render();
     }
@@ -1338,7 +1361,19 @@ impl Panel {
             }
             PanelCmd::Dropped(items) => self.emit(UiEvent::Dropped(items)),
             PanelCmd::SetEditing(on) => self.set_editing(on && self.mode == Mode::Dock),
+            PanelCmd::SetDockPlacement { edge, offset, size } => {
+                let d = &mut self.dock;
+                if (d.edge, d.offset, d.size) != (edge, offset, size) {
+                    (d.edge, d.offset, d.size) = (edge, offset, size);
+                    if self.mode == Mode::Dock {
+                        self.place_windows();
+                        self.render();
+                    }
+                }
+            }
             PanelCmd::Close => {
+                // 실행 중에 닫히는 독도 타이머 해상도를 돌려놓는다
+                self.stop_animation();
                 drop::revoke(&[self.glass, self.content]);
                 let _ = unsafe { DestroyWindow(self.content) };
                 let _ = unsafe { DestroyWindow(self.glass) };
@@ -1587,6 +1622,8 @@ mod window_tests {
             panel_icon_size: 56,
             dock_offset: 0.5,
             dock_size: 48,
+            monitor: None,
+            editing: false,
         }
     }
 
@@ -1691,5 +1728,73 @@ mod window_tests {
         pump(50);
         assert!(unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(h.owner())) }.as_bool());
         close(&h);
+    }
+
+    #[test]
+    fn dock_is_placed_on_the_given_monitor() {
+        let m = *desktop::monitors().last().unwrap();
+        let (x, y, ..) = m.work;
+        let mut s = spec(Mode::Dock, (x, y, 200, 200), 2);
+        s.monitor = Some(m.handle);
+        let (h, _) = open(s);
+        let (gx, gy, gw, gh) = screen_rect(h.owner());
+        let (cx, cy) = (gx + gw / 2, gy + gh / 2);
+        let (wx, wy, ww, wh) = m.work;
+        assert!(cx >= wx && cx < wx + ww && cy >= wy && cy < wy + wh, "{:?} / {:?}", (gx, gy, gw, gh), m.work);
+        close(&h);
+    }
+
+    #[test]
+    fn placement_command_moves_without_reporting_back() {
+        let (h, events) = open(spec(Mode::Dock, (0, 0, 200, 200), 3));
+        let (_, _, w, height) = screen_rect(h.owner());
+        assert!(w > height, "아래 독은 가로로 길다");
+        h.send(PanelCmd::SetDockPlacement { edge: DockEdge::Left, offset: 0.2, size: 48 });
+        pump(50);
+        let (_, _, w, height) = screen_rect(h.owner());
+        assert!(height > w, "왼쪽 독은 세로로 길다");
+        assert!(!events.borrow().iter().any(|e| matches!(e, UiEvent::DockChanged { .. } | UiEvent::DockMoving { .. })));
+        close(&h);
+    }
+
+    #[test]
+    fn moving_reports_position_while_dragging() {
+        let (h, events) = open(spec(Mode::Dock, (0, 0, 200, 200), 1));
+        h.send(PanelCmd::SetEditing(true));
+        pump(50);
+        let glass = h.owner();
+        unsafe {
+            SendMessageW(glass, WM_LBUTTONDOWN, None, Some(LPARAM((20 << 16) | 2)));
+            SendMessageW(glass, WM_MOUSEMOVE, None, Some(LPARAM((20 << 16) | 3)));
+        }
+        pump(20);
+        assert!(events.borrow().iter().any(|e| matches!(e, UiEvent::DockMoving { .. })), "{:?}", events.borrow());
+        unsafe { SendMessageW(glass, WM_LBUTTONUP, None, Some(LPARAM((20 << 16) | 3))) };
+        close(&h);
+    }
+
+    #[test]
+    fn opens_in_editing_state_when_asked() {
+        let mut s = spec(Mode::Dock, (0, 0, 200, 200), 2);
+        s.editing = true;
+        let (h, _) = open(s);
+        let editing_w = screen_rect(h.owner()).2;
+        close(&h);
+        let (h, _) = open(spec(Mode::Dock, (0, 0, 200, 200), 2));
+        assert!(editing_w > screen_rect(h.owner()).2, "수정 모드는 단추만큼 길다");
+        close(&h);
+    }
+
+    #[test]
+    fn close_while_animating_destroys_both_windows() {
+        let (h, _) = open(spec(Mode::Dock, (0, 0, 200, 200), 1));
+        let glass = h.owner();
+        let content = content_of(glass);
+        h.send(PanelCmd::SetTheme(Theme::Dark));
+        h.send(PanelCmd::Close);
+        pump(50);
+        use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+        assert!(!unsafe { IsWindow(Some(glass)) }.as_bool());
+        assert!(!unsafe { IsWindow(Some(content)) }.as_bool());
     }
 }

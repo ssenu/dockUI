@@ -635,6 +635,8 @@ impl App {
             dock_size: self.config.dock_size,
             custom_theme: self.config.custom_theme,
             panel_icon_size: self.config.panel_icon_size,
+            monitor: None,
+            editing: false,
         };
         match Panel::open(spec, notify) {
             Ok(handle) => self.panel = Some(handle),
@@ -680,6 +682,7 @@ impl App {
                 self.save();
             }
             UiEvent::EditingChanged(on) => self.dock_editing = on,
+            UiEvent::DockMoving { .. } => {}
         }
     }
 
