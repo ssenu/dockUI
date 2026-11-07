@@ -1,4 +1,4 @@
-//! 패널·독 한 프레임 그리기: 유리 덧칠, 헤더, 아이콘, ＋, 팔레트 버튼, 말풍선, 테마 선택기, 드래그 중인 아이콘.
+//! 패널·독 한 프레임 그리기: 유리 덧칠, 헤더, 아이콘, ＋, 말풍선, 드래그 중인 아이콘.
 
 use crate::config::DockEdge;
 use crate::ui::dock_layout::{self, DockLayout, Magnified, Slot};

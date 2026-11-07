@@ -74,7 +74,6 @@ const MAX_FRAME_DT: f32 = 50.0;
 const SAVE_DELAY_MS: u32 = 500;
 const DRAG_THRESHOLD: f32 = 6.0;
 const FADE_MS: f32 = 200.0;
-/// 독 말풍선이 차지하는 여유 (창 영역 계산용)
 const GLASS_CLASS: &str = "YTLauncherGlass";
 const CONTENT_CLASS: &str = "YTLauncherContent";
 const CMD_EDIT: u32 = 1;
