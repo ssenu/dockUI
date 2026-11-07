@@ -131,6 +131,10 @@ pub struct LoadReport {
     pub recovered: bool,
     /// 0.1.x 설정을 변환함
     pub migrated: bool,
+    /// 읽지 못해 건너뛴 항목 수 (원본은 .bak에 있다)
+    pub skipped_items: usize,
+    /// 파일을 읽을 수 없어 기본값으로 시작함 (이번 실행은 저장하지 않는다)
+    pub read_failed: bool,
 }
 
 pub fn default_dir() -> PathBuf {
@@ -140,11 +144,13 @@ pub fn default_dir() -> PathBuf {
 
 pub struct Storage {
     pub dir: PathBuf,
+    /// 설정을 읽지 못한 실행: 원본을 덮어쓰지 않도록 저장하지 않는다
+    read_only: std::cell::Cell<bool>,
 }
 
 impl Storage {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Storage { dir: dir.into() }
+        Storage { dir: dir.into(), read_only: std::cell::Cell::new(false) }
     }
 
     pub fn path(&self) -> PathBuf {
@@ -153,30 +159,38 @@ impl Storage {
 
     pub fn load(&self) -> (Config, LoadReport) {
         let path = self.path();
-        let bytes = match fs::read(&path) {
+        let bytes = match read_with_retry(&path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return (Config::default(), LoadReport::default()),
-            Err(_) => return self.recover(&path),
+            Err(e) => {
+                crate::logging::error(&format!("설정 파일을 읽지 못했습니다: {e}"));
+                self.read_only.set(true);
+                return (Config::default(), LoadReport { read_failed: true, ..Default::default() });
+            }
         };
         let parsed: Option<Value> = std::str::from_utf8(&bytes)
             .ok()
             .map(|s| s.trim_start_matches('\u{feff}'))
             .and_then(|s| serde_json::from_str(s).ok());
-        let Some(value) = parsed else { return self.recover(&path) };
+        let Some(mut value) = parsed else { return self.recover(&path) };
         if value.get("schema").and_then(Value::as_u64) == Some(1) {
             return match migrate_v1(&value) {
                 Some(config) => {
                     let _ = fs::copy(&path, self.dir.join(V1_BACKUP_NAME));
                     let _ = self.save(&config);
-                    (config, LoadReport { recovered: false, migrated: true })
+                    (config, LoadReport { migrated: true, ..Default::default() })
                 }
                 None => self.recover(&path),
             };
         }
+        let skipped_items = drop_bad_items(&mut value);
+        if skipped_items > 0 {
+            let _ = fs::copy(&path, self.dir.join(BACKUP_NAME));
+        }
         match serde_json::from_value::<Config>(value) {
             Ok(mut config) => {
                 config.schema = SCHEMA;
-                (config, LoadReport::default())
+                (config, LoadReport { skipped_items, ..Default::default() })
             }
             Err(_) => self.recover(&path),
         }
@@ -184,17 +198,46 @@ impl Storage {
 
     fn recover(&self, path: &Path) -> (Config, LoadReport) {
         let _ = fs::rename(path, self.dir.join(BACKUP_NAME));
-        (Config::default(), LoadReport { recovered: true, migrated: false })
+        (Config::default(), LoadReport { recovered: true, ..Default::default() })
     }
 
     /// 임시 파일에 다 쓴 뒤 교체한다 (저장 중 꺼져도 파일이 깨지지 않음).
     pub fn save(&self, config: &Config) -> io::Result<()> {
+        if self.read_only.get() {
+            return Ok(());
+        }
         fs::create_dir_all(&self.dir)?;
         let tmp = self.dir.join("config.json.tmp");
         let json = serde_json::to_string_pretty(config).map_err(io::Error::other)?;
         fs::write(&tmp, json)?;
         fs::rename(&tmp, self.path())
     }
+}
+
+const READ_RETRIES: u32 = 3;
+const READ_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// 백신 등이 잠깐 잡고 있어도 초기화로 넘어가지 않게, 없는 파일이 아닌 읽기 실패는 몇 번 더 시도한다.
+fn read_with_retry(path: &Path) -> io::Result<Vec<u8>> {
+    let mut result = fs::read(path);
+    for _ in 0..READ_RETRIES {
+        match &result {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                std::thread::sleep(READ_RETRY_DELAY);
+                result = fs::read(path);
+            }
+            _ => break,
+        }
+    }
+    result
+}
+
+/// 읽을 수 없는 항목(모르는 종류 등)을 빼고 뺀 수를 돌려준다. 하나 때문에 설정 전체를 잃지 않게 한다.
+fn drop_bad_items(value: &mut Value) -> usize {
+    let Some(items) = value.get_mut("items").and_then(Value::as_array_mut) else { return 0 };
+    let before = items.len();
+    items.retain(|item| serde_json::from_value::<Item>(item.clone()).is_ok());
+    before - items.len()
 }
 
 /// 0.1.x 설정 → schema 2. 타일은 유튜브 항목으로, 창 위치는 패널 위치로, 모드는 패널.
@@ -380,5 +423,38 @@ mod tests {
         let (config, report) = Storage::new(&dir).load();
         assert!(!report.recovered);
         assert!(config.locked);
+    }
+
+    #[test]
+    fn unknown_item_is_skipped_and_the_rest_are_kept() {
+        let dir = temp_dir("skip");
+        let text = r#"{"schema":2,"locked":true,"items":[
+            {"kind":"web","id":"w","url":"https://a.com"},
+            {"kind":"hologram","id":"h"},
+            {"kind":"youtube","id":"y","query":"q"}]}"#;
+        fs::write(dir.join(CONFIG_NAME), text).unwrap();
+        let (config, report) = Storage::new(&dir).load();
+        assert_eq!(report.skipped_items, 1);
+        assert!(!report.recovered);
+        assert!(config.locked, "다른 설정은 그대로");
+        let ids: Vec<&str> = config.items.iter().map(Item::id).collect();
+        assert_eq!(ids, ["w", "y"]);
+        assert_eq!(fs::read_to_string(dir.join(BACKUP_NAME)).unwrap(), text, "원본을 남긴다");
+    }
+
+    #[test]
+    fn unreadable_file_starts_with_defaults_and_is_never_overwritten() {
+        let dir = temp_dir("unreadable");
+        // 폴더를 파일처럼 읽으면 NotFound가 아닌 오류가 난다
+        fs::create_dir(dir.join(CONFIG_NAME)).unwrap();
+        let storage = Storage::new(&dir);
+        let (config, report) = storage.load();
+        assert_eq!(config, Config::default());
+        assert!(report.read_failed);
+        assert!(!report.recovered);
+        storage.save(&Config { locked: true, ..Config::default() }).unwrap();
+        assert!(dir.join(CONFIG_NAME).is_dir(), "이번 실행은 저장하지 않는다");
+        assert!(!dir.join("config.json.tmp").exists());
+        assert!(!dir.join(BACKUP_NAME).exists());
     }
 }

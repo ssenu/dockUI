@@ -124,6 +124,17 @@ pub fn startup_notices(report: LoadReport, last_run: &str, current: &str) -> Vec
     if report.recovered {
         notices.push("설정 파일이 손상되어 초기화했습니다. 이전 파일은 config.json.bak에 있습니다.".to_string());
     }
+    if report.read_failed {
+        notices.push(
+            "설정 파일을 읽지 못해 기본 설정으로 시작했습니다. 이번 실행의 변경은 저장되지 않습니다.".to_string(),
+        );
+    }
+    if report.skipped_items > 0 {
+        notices.push(format!(
+            "읽을 수 없는 항목 {}개를 건너뛰었습니다. 이전 파일은 config.json.bak에 있습니다.",
+            report.skipped_items
+        ));
+    }
     if !last_run.is_empty() && updater::is_newer(current, last_run) {
         notices.push(format!("v{current} 버전으로 업데이트되었습니다."));
     }
@@ -1085,7 +1096,7 @@ mod tests {
 
     #[test]
     fn startup_notices_cover_recovery_and_upgrade() {
-        let recovered = LoadReport { recovered: true, migrated: false };
+        let recovered = LoadReport { recovered: true, ..Default::default() };
         assert_eq!(startup_notices(LoadReport::default(), "", "0.2.0"), Vec::<String>::new());
         assert_eq!(startup_notices(LoadReport::default(), "0.2.0", "0.2.0"), Vec::<String>::new());
         assert_eq!(
@@ -1093,6 +1104,10 @@ mod tests {
             vec!["v0.2.0 버전으로 업데이트되었습니다.".to_string()]
         );
         assert_eq!(startup_notices(recovered, "", "0.2.0").len(), 1);
+        let skipped = LoadReport { skipped_items: 2, ..Default::default() };
+        assert!(startup_notices(skipped, "", "0.2.0")[0].contains("2개"));
+        let failed = LoadReport { read_failed: true, ..Default::default() };
+        assert!(startup_notices(failed, "", "0.2.0")[0].contains("저장되지 않습니다"));
     }
 
     #[test]
