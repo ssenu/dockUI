@@ -17,6 +17,7 @@ use crate::ui::scene::{TileKind, TileView, badge_of};
 use crate::ui::theme::{self, PICKER_ORDER};
 use crate::ui::theme_dialog::custom_theme_dialog;
 use crate::updater::{self, Release, UreqHttp};
+use crate::win::desktop;
 use crate::win::instance::WM_APP_SHOW;
 use crate::win::menu::{MenuEntry, show_popup};
 use crate::win::msg_window::Handler;
@@ -30,10 +31,10 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CHILDID_SELF, DestroyWindow, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, GA_ROOT, GetAncestor, IDYES, KillTimer,
-    MB_ICONQUESTION, MB_YESNO, MessageBoxW, OBJID_WINDOW, PostMessageW, PostQuitMessage, RegisterWindowMessageW,
-    SetTimer, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP,
-    WM_RBUTTONUP, WM_TIMER,
+    CHILDID_SELF, DestroyWindow, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, GA_ROOT, GetAncestor, IDYES, IsWindow,
+    KillTimer, MB_ICONQUESTION, MB_YESNO, MessageBoxW, OBJID_WINDOW, PostMessageW, PostQuitMessage,
+    RegisterWindowMessageW, SetTimer, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CONTEXTMENU,
+    WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::{HSTRING, w};
 
@@ -577,6 +578,7 @@ impl App {
         {
             logging::error(&format!("자동 실행 설정 실패: {e}"));
         }
+        Self::log_monitors();
         self.update_running_silently();
         self.open_panel();
         self.watch_windows(hwnd);
@@ -592,6 +594,24 @@ impl App {
     }
 
     /// 화면을 열기 전 첫 계산 (화면에 보낼 곳이 아직 없다)
+    /// 탐색기가 다시 시작됨: 소유자(Progman)가 사라져 독 창이 없어졌으면 다시 열고, 살아 있으면 소유자를 다시 지정한다.
+    fn on_shell_restart(&mut self) {
+        let alive = self.panel.as_ref().is_some_and(|p| unsafe { IsWindow(Some(p.owner())) }.as_bool());
+        if alive {
+            self.panel_send(PanelCmd::Repin);
+        } else {
+            logging::warn("독 창이 없어져 다시 엽니다");
+            self.panel = None;
+            self.open_panel();
+        }
+    }
+
+    fn log_monitors() {
+        for m in desktop::monitors() {
+            logging::info(&format!("모니터 {:?}: 작업 영역 {:?}, 주 모니터 {}", m.handle.0, m.work, m.primary));
+        }
+    }
+
     fn update_running_silently(&mut self) {
         let keys = app_keys(&self.config.items);
         if keys.iter().any(Option::is_some) {
@@ -1048,9 +1068,11 @@ impl Handler for App {
                 unsafe { PostQuitMessage(0) };
             }
             m if m == self.taskbar_created && m != 0 => {
+                logging::info("탐색기 다시 시작 알림");
                 if let Some(tray) = &self.tray {
                     tray.add();
                 }
+                self.on_shell_restart();
             }
             _ => return None,
         }

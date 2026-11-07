@@ -6,7 +6,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWLP_HWNDPARENT, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos,
+    FindWindowW, GWLP_HWNDPARENT, HWND_BOTTOM, MONITORINFOF_PRIMARY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetWindowLongPtrW, SetWindowPos,
 };
 use windows::core::{BOOL, w};
 
@@ -46,20 +47,38 @@ pub fn primary_work_area() -> PxRect {
     }
 }
 
-/// 모든 모니터의 작업 영역
-pub fn work_areas() -> Vec<PxRect> {
+/// 모니터 하나
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Monitor {
+    pub handle: HMONITOR,
+    /// 작업 영역 (작업표시줄 제외)
+    pub work: PxRect,
+    pub primary: bool,
+}
+
+/// 연결된 모든 모니터
+pub fn monitors() -> Vec<Monitor> {
     unsafe extern "system" fn collect(monitor: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
         // SAFETY: data는 아래에서 넘긴 Vec 포인터
-        let out = unsafe { &mut *(data.0 as *mut Vec<PxRect>) };
+        let out = unsafe { &mut *(data.0 as *mut Vec<Monitor>) };
         let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-            out.push(rect_tuple(info.rcWork));
+            out.push(Monitor {
+                handle: monitor,
+                work: rect_tuple(info.rcWork),
+                primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+            });
         }
         true.into()
     }
-    let mut out: Vec<PxRect> = Vec::new();
+    let mut out: Vec<Monitor> = Vec::new();
     let _ = unsafe { EnumDisplayMonitors(None, None, Some(collect), LPARAM(&mut out as *mut _ as isize)) };
     out
+}
+
+/// 모든 모니터의 작업 영역
+pub fn work_areas() -> Vec<PxRect> {
+    monitors().into_iter().map(|m| m.work).collect()
 }
 
 /// 시스템(주 모니터) 배율. 창을 만들기 전 기본 크기 계산에 쓴다.
@@ -83,5 +102,13 @@ mod tests {
         let primary = primary_work_area();
         assert!(primary.2 > 0 && primary.3 > 0);
         assert!(work_areas().contains(&primary));
+    }
+
+    #[test]
+    fn exactly_one_primary_monitor_matches_the_work_area() {
+        let all = monitors();
+        let primary: Vec<&Monitor> = all.iter().filter(|m| m.primary).collect();
+        assert_eq!(primary.len(), 1);
+        assert_eq!(primary[0].work, primary_work_area());
     }
 }

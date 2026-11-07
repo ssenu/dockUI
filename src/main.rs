@@ -25,14 +25,15 @@ fn main() {
 
     let data_dir = config::default_dir();
     logging::init(&data_dir.join("logs"));
-    logging::info(&format!("{} {} 시작", app::APP_NAME, app::CURRENT_VERSION));
 
     // 핸들은 프로세스가 끝날 때까지 쥐고 있는다 (설치 프로그램이 실행 중 감지에 씀)
     let (_mutex, existed) = acquire_mutex(MUTEX_NAME);
     if existed {
+        logging::info("이미 실행 중: 기존 창에 보이기 요청");
         notify_existing();
         return;
     }
+    logging::info(&format!("{} {} 시작", app::APP_NAME, app::CURRENT_VERSION));
 
     // 알림 머리글에 설치 바로가기 이름(Dock UI)·아이콘이 쓰이게 앱 ID를 고정한다
     let _ = unsafe {

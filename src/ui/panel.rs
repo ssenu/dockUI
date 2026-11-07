@@ -56,6 +56,16 @@ const TIMER_ANIM: usize = 1;
 const TIMER_SAVE_GEOMETRY: usize = 2;
 /// 마우스 오버가 떠 있는 동안 커서가 아직 판 위에 있는지 확인하는 타이머 (나가기 알림이 안 오는 경우 대비)
 const TIMER_HOVER_POLL: usize = 3;
+/// 소유자 지정·그리기 장치가 준비되지 않았을 때 다시 시도하는 타이머
+const TIMER_RETRY: usize = 4;
+const RETRY_MS: u32 = 2000;
+/// 소유자 지정을 다시 시도하는 횟수 (2초 × 30 = 60초)
+const PIN_RETRIES: u32 = 30;
+
+/// 다시 시도를 계속할지: 그리기 장치는 될 때까지, 소유자 지정은 정해진 횟수만큼
+fn retry_continues(pinned: bool, has_gfx: bool, retries_left: u32) -> bool {
+    !has_gfx || (!pinned && retries_left > 0)
+}
 const HOVER_POLL_MS: u32 = 120;
 /// 애니메이션 타이머 간격. 실제 프레임은 화면 합성 주기(DwmFlush)에 맞춘다.
 const FRAME_MS: u32 = 10;
@@ -72,6 +82,8 @@ const CMD_DELETE: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PanelCmd {
+    /// 탐색기가 다시 시작됨: 바탕화면 소유자를 다시 지정한다
+    Repin,
     SetTiles(Vec<TileView>),
     SetTheme(Theme),
     /// 사용자 지정 테마 값 (테마가 `Custom`이면 바로 보인다: 설정 창 미리보기)
@@ -205,6 +217,10 @@ pub struct Panel {
     custom: CustomTheme,
     blur_on: bool,
     scale: f32,
+    /// 바탕화면(Progman)이 소유자로 지정됨. 아니면 맨 아래로 보내지 않는다 (바탕화면 뒤로 숨는다)
+    pinned: bool,
+    /// 소유자 지정을 다시 시도할 남은 횟수
+    pin_retries: u32,
     mode: Mode,
     layout: PanelLayout,
     dock: Dock,
@@ -318,6 +334,8 @@ impl Panel {
             custom: spec.custom_theme,
             blur_on: true,
             scale: 1.0,
+            pinned: false,
+            pin_retries: PIN_RETRIES,
             mode: spec.mode,
             layout: PanelLayout::compute(
                 spec.panel_rect.2 as f32,
@@ -405,7 +423,7 @@ impl Panel {
 
     fn init(&mut self) {
         let rect = screen_rect(self.glass);
-        desktop::pin_to_desktop(self.glass);
+        self.pinned = desktop::pin_to_desktop(self.glass);
         self.scale = desktop::scale_for(self.glass);
         self.acrylic = dwm::enable_acrylic(self.glass, self.theme_palette(self.theme).dark_backdrop);
         // 사용자 지정 테마에서 흐림을 꺼 두었으면 시작할 때 바로 끈다
@@ -438,8 +456,53 @@ impl Panel {
             let _ = ShowWindow(self.glass, SW_SHOWNOACTIVATE);
             let _ = ShowWindow(self.content, SW_SHOWNOACTIVATE);
         }
-        desktop::send_to_bottom(self.glass);
+        if self.pinned {
+            desktop::send_to_bottom(self.glass);
+        }
+        logging::info(&format!("바탕화면 소유자 지정: {}", if self.pinned { "성공" } else { "실패" }));
+        logging::info(&format!(
+            "화면 준비: 모드 {:?}, 배율 {}, 유리 창 {:?}, 그리기 장치 {}",
+            self.mode,
+            self.scale,
+            screen_rect(self.glass),
+            self.gfx.is_some()
+        ));
+        self.arm_retry();
         self.render();
+    }
+
+    /// 바탕화면에 붙이고, 되면 다른 창 뒤로 내린다
+    fn try_pin(&mut self) {
+        self.pinned = desktop::pin_to_desktop(self.glass);
+        if self.pinned {
+            desktop::send_to_bottom(self.glass);
+        }
+        logging::info(&format!("바탕화면 소유자 지정: {}", if self.pinned { "성공" } else { "실패" }));
+    }
+
+    /// 아직 준비되지 않은 것이 있으면 다시 시도 타이머를 건다
+    fn arm_retry(&self) {
+        if retry_continues(self.pinned, self.gfx.is_some(), self.pin_retries) {
+            unsafe { SetTimer(Some(self.glass), TIMER_RETRY, RETRY_MS, None) };
+        }
+    }
+
+    fn on_retry(&mut self) {
+        if !self.pinned && self.pin_retries > 0 {
+            self.pin_retries -= 1;
+            self.try_pin();
+        }
+        if self.gfx.is_none() && !self.content.0.is_null() {
+            self.recreate_gfx();
+            if self.gfx.is_some() {
+                logging::info("그리기 장치를 다시 만들었습니다");
+                self.place_windows();
+                self.render();
+            }
+        }
+        if !retry_continues(self.pinned, self.gfx.is_some(), self.pin_retries) {
+            let _ = unsafe { KillTimer(Some(self.glass), TIMER_RETRY) };
+        }
     }
 
     fn emit(&self, event: UiEvent) {
@@ -511,8 +574,19 @@ impl Panel {
         }
     }
 
-    /// 지금 모드에 맞게 두 창의 위치·크기를 정한다.
+    /// 지금 모드에 맞게 두 창의 위치·크기를 정한다. 다른 배율의 모니터로 옮겨졌으면 그 배율로 한 번 더 놓는다
+    /// (핸들러 안에서 옮기면 `WM_DPICHANGED`가 재진입 방어에 막혀 오지 않는다).
     fn place_windows(&mut self) {
+        self.place_once();
+        let scale = desktop::scale_for(self.glass);
+        if scale != self.scale {
+            logging::info(&format!("배율 변경 {} → {scale}", self.scale));
+            self.scale = scale;
+            self.place_once();
+        }
+    }
+
+    fn place_once(&mut self) {
         // 창을 새로 놓으므로 기억해 둔 독 유리 창·영역은 무효
         self.last_glass = None;
         self.last_region.clear();
@@ -785,7 +859,10 @@ impl Panel {
         let (_, _, w, h) = screen_rect(self.content);
         match Gfx::new(self.content, w as u32, h as u32, self.draw_scale()) {
             Ok(gfx) => self.gfx = Some(gfx),
-            Err(e) => logging::error(&format!("그리기 장치를 다시 만들지 못했습니다: {e}")),
+            Err(e) => {
+                logging::error(&format!("그리기 장치를 다시 만들지 못했습니다: {e}"));
+                self.arm_retry();
+            }
         }
     }
 
@@ -1155,6 +1232,11 @@ impl Panel {
 
     fn apply(&mut self, cmd: PanelCmd) {
         match cmd {
+            PanelCmd::Repin => {
+                self.pin_retries = PIN_RETRIES;
+                self.try_pin();
+                self.arm_retry();
+            }
             PanelCmd::SetTiles(tiles) => {
                 // 실행 중 점·아이콘만 바뀐 경우(같은 항목 순서)는 마우스 상태를 그대로 둔다
                 let same_items =
@@ -1312,7 +1394,7 @@ impl Handler for Panel {
             }
             WM_ACTIVATE => {
                 // 다른 앱으로 포커스가 넘어가면 다시 바탕화면 쪽으로 내린다 (우리 대화상자·메뉴는 제외)
-                if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && !foreground_is_ours() {
+                if self.pinned && (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && !foreground_is_ours() {
                     desktop::send_to_bottom(hwnd);
                 }
                 return None;
@@ -1348,6 +1430,9 @@ impl Handler for Panel {
                 return None;
             }
             WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+                if msg == WM_DISPLAYCHANGE {
+                    logging::info("화면 구성 변경 알림");
+                }
                 // 해상도·작업표시줄이 바뀌면 독을 다시 놓는다
                 if self.mode == Mode::Dock {
                     self.place_windows();
@@ -1396,6 +1481,7 @@ impl Handler for Panel {
             }
             WM_TIMER => match wparam.0 {
                 TIMER_ANIM => self.tick(),
+                TIMER_RETRY => self.on_retry(),
                 TIMER_HOVER_POLL => {
                     // 누르거나 끄는 중이 아니고 커서가 판을 벗어났으면(말풍선 위·다른 창 위 포함) 바로 마우스 오버를 끈다
                     if self.press.is_none() && self.drag.is_none() && !self.cursor_over_glass() {
@@ -1441,6 +1527,15 @@ impl Handler for Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_runs_until_gfx_exists_and_pin_gives_up() {
+        assert!(!retry_continues(true, true, 5), "둘 다 되면 끝");
+        assert!(retry_continues(false, true, 5), "소유자 지정은 횟수만큼");
+        assert!(!retry_continues(false, true, 0));
+        assert!(retry_continues(true, false, 0), "그리기 장치는 될 때까지");
+        assert!(retry_continues(false, false, 0));
+    }
 
     #[test]
     fn panel_side_room_only_when_tooltip_is_wider_than_the_panel() {
@@ -1586,6 +1681,15 @@ mod window_tests {
         pump(50);
         let grown = events.borrow().iter().any(|e| matches!(e, UiEvent::GeometryChanged(r) if r.h > 210));
         assert!(grown, "{:?}", events.borrow());
+        close(&h);
+    }
+
+    #[test]
+    fn repin_keeps_the_window_alive() {
+        let (h, _) = open(spec(Mode::Dock, (0, 0, 200, 200), 1));
+        h.send(PanelCmd::Repin);
+        pump(50);
+        assert!(unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(h.owner())) }.as_bool());
         close(&h);
     }
 }
