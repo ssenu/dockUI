@@ -93,13 +93,21 @@ fn non_empty(s: &str) -> Option<&str> {
     (!t.is_empty()).then_some(t)
 }
 
+/// 첫 `/`·`?`·`#` 앞에 `://`가 있으면 스킴이 적힌 주소다 (쿼리 안의 `://`는 세지 않는다)
+fn has_scheme(input: &str) -> bool {
+    match (input.find("://"), input.find(['/', '?', '#'])) {
+        (Some(scheme), Some(delimiter)) => scheme <= delimiter,
+        _ => false,
+    }
+}
+
 /// `naver.com` → `https://naver.com`. http/https가 아니거나 호스트가 없으면 거부.
 pub fn normalize_url(input: &str) -> Result<String, ItemError> {
     let input = input.trim();
     if input.is_empty() || input.chars().any(char::is_whitespace) {
         return Err(ItemError::InvalidUrl);
     }
-    let url = if input.contains("://") { input.to_string() } else { format!("https://{input}") };
+    let url = if has_scheme(input) { input.to_string() } else { format!("https://{input}") };
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return Err(ItemError::InvalidUrl);
@@ -110,7 +118,8 @@ pub fn normalize_url(input: &str) -> Result<String, ItemError> {
     if host_ok && port_ok { Ok(url) } else { Err(ItemError::InvalidUrl) }
 }
 
-fn authority_of(url: &str) -> Option<&str> {
+/// `https://user@www.github.com:443/a` → `www.github.com:443`
+pub fn authority_of(url: &str) -> Option<&str> {
     let rest = url.split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next()?;
     Some(authority.rsplit_once('@').map_or(authority, |(_, h)| h))
@@ -165,6 +174,13 @@ mod tests {
         assert_eq!(normalize_url("javascript:alert(1)"), Err(ItemError::InvalidUrl));
         assert_eq!(normalize_url("https://"), Err(ItemError::InvalidUrl));
         assert_eq!(normalize_url("has space.com"), Err(ItemError::InvalidUrl));
+    }
+
+    #[test]
+    fn scheme_is_only_read_before_the_path() {
+        assert_eq!(normalize_url("naver.com/a?u=https://b.com").unwrap(), "https://naver.com/a?u=https://b.com");
+        assert_eq!(normalize_url("https://naver.com/a?u=ftp://b.com").unwrap(), "https://naver.com/a?u=ftp://b.com");
+        assert_eq!(normalize_url("ftp://x.com/a?u=https://b.com"), Err(ItemError::InvalidUrl));
     }
 
     #[test]

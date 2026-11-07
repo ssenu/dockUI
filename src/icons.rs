@@ -1,6 +1,6 @@
 //! 아이콘 캐시(`%APPDATA%\YT-Launcher\icons\<항목id>.png`): 앱 아이콘 추출, 웹 파비콘 받기.
 
-use crate::items::{Item, host_of};
+use crate::items::{Item, authority_of};
 use crate::updater::{Http, UreqHttp};
 use crate::win::shell_items::{apps_folder_path, save_item_icon};
 use std::io::Read;
@@ -75,8 +75,8 @@ pub fn resolve_url(page: &str, href: &str) -> Option<String> {
     if let Some(rest) = href.strip_prefix("//") {
         return Some(format!("{scheme}://{rest}"));
     }
-    let host = host_of(page)?;
-    let origin = format!("{scheme}://{host}");
+    let authority = authority_of(page).filter(|a| !a.is_empty())?;
+    let origin = format!("{scheme}://{authority}");
     if href.starts_with('/') {
         return Some(format!("{origin}{href}"));
     }
@@ -254,6 +254,9 @@ mod tests {
         assert_eq!(resolve_url(page, "https://a.b/c.ico").unwrap(), "https://a.b/c.ico");
         assert_eq!(resolve_url("https://naver.com", "favicon.ico").unwrap(), "https://naver.com/favicon.ico");
         assert_eq!(resolve_url(page, "data:image/png;base64,xx"), None);
+        let port = "https://user@site.kr:8443/a/b.html";
+        assert_eq!(resolve_url(port, "/favicon.ico").unwrap(), "https://site.kr:8443/favicon.ico");
+        assert_eq!(resolve_url(port, "i.png").unwrap(), "https://site.kr:8443/a/i.png");
     }
 
     #[test]
