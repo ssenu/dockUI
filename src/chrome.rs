@@ -56,18 +56,29 @@ fn is_chrome_window(w: &TopWindow) -> bool {
         && Path::new(&w.exe).file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case("chrome.exe"))
 }
 
+/// 앞으로 가져올 창 번호 (순수 함수). 찾는 제목이 없으면 첫 창, 있으면 그 창.
+/// 제목을 못 찾았으면 시간이 다 된 뒤에만 첫 창으로 물러난다.
+fn pick_window(titles: &[&str], prefer: Option<&str>, expired: bool) -> Option<usize> {
+    let first = (!titles.is_empty()).then_some(0);
+    match prefer {
+        None => first,
+        Some(want) => titles.iter().position(|t| t.contains(want)).or(if expired { first } else { None }),
+    }
+}
+
 /// 방금 연 탭의 크롬 창을 찾아 최대화·전면화. `prefer_title`이 제목에 들어간 창을 우선한다.
 pub fn focus_chrome_window(prefer_title: Option<&str>, timeout: Duration) -> bool {
     std::thread::sleep(Duration::from_millis(500));
     let deadline = Instant::now() + timeout;
     loop {
         let windows: Vec<TopWindow> = list_top_windows().into_iter().filter(is_chrome_window).collect();
-        let preferred = prefer_title.and_then(|t| windows.iter().find(|w| w.title.contains(t)));
-        if let Some(w) = preferred {
-            return maximize_and_focus(w.handle());
+        let titles: Vec<&str> = windows.iter().map(|w| w.title.as_str()).collect();
+        let expired = Instant::now() >= deadline;
+        if let Some(i) = pick_window(&titles, prefer_title, expired) {
+            return maximize_and_focus(windows[i].handle());
         }
-        if Instant::now() >= deadline {
-            return windows.first().is_some_and(|w| maximize_and_focus(w.handle()));
+        if expired {
+            return false;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -129,5 +140,17 @@ mod tests {
         if let Some(p) = registry_chrome_path() {
             assert!(p.is_file());
         }
+    }
+
+    #[test]
+    fn picks_window_without_waiting_when_no_title_is_wanted() {
+        // 찾는 제목이 없으면 크롬 창이 보이는 즉시
+        assert_eq!(pick_window(&["새 탭", "메일"], None, false), Some(0));
+        assert_eq!(pick_window(&[], None, false), None);
+        // 찾는 제목이 있으면 그 창을, 없으면 시간이 다 될 때까지 기다린다
+        assert_eq!(pick_window(&["메일", "로파이 - YouTube"], Some("YouTube"), false), Some(1));
+        assert_eq!(pick_window(&["메일"], Some("YouTube"), false), None);
+        assert_eq!(pick_window(&["메일"], Some("YouTube"), true), Some(0));
+        assert_eq!(pick_window(&[], Some("YouTube"), true), None);
     }
 }
