@@ -38,7 +38,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyWindow, GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+    DestroyWindow, GWL_EXSTYLE, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
     HTTOPLEFT, HTTOPRIGHT, HTTRANSPARENT, IDC_SIZEALL, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE, MINMAXINFO,
     PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSENDCHANGING,
@@ -65,6 +65,11 @@ const PIN_RETRIES: u32 = 30;
 /// 다시 시도를 계속할지: 그리기 장치는 될 때까지, 소유자 지정은 정해진 횟수만큼
 fn retry_continues(pinned: bool, has_gfx: bool, retries_left: u32) -> bool {
     !has_gfx || (!pinned && retries_left > 0)
+}
+
+/// 그리기 장치가 없어도 콘텐츠 창이 없으면 다시 시도할 것이 없다: 이때는 그리기를 기다리지 않는다
+fn gfx_settled(has_gfx: bool, content_missing: bool) -> bool {
+    has_gfx || content_missing
 }
 const HOVER_POLL_MS: u32 = 120;
 /// 애니메이션 타이머 간격. 실제 프레임은 화면 합성 주기(DwmFlush)에 맞춘다.
@@ -227,6 +232,8 @@ pub struct Panel {
     glass: HWND,
     content: HWND,
     gfx: Option<Gfx>,
+    /// 그리기 장치를 다시 만들지 못했다는 로그를 이미 남김 (되풀이 방지)
+    gfx_error_logged: bool,
     acrylic: bool,
     /// 사용자 지정 테마 값과, 지금 유리 창 흐림이 켜져 있는지
     custom: CustomTheme,
@@ -294,6 +301,21 @@ fn foreground_is_ours() -> bool {
     pid == unsafe { GetCurrentProcessId() }
 }
 
+/// 비활성이 될 때 바탕으로 내릴지: 다른 앱이나 다른 독으로 넘어가면 내린다 (우리 대화상자·메뉴는 제외)
+fn lower_on_deactivate(pinned: bool, foreground_ours: bool, next_is_dock: bool) -> bool {
+    pinned && (!foreground_ours || next_is_dock)
+}
+
+/// 활성화되는 창이 (자기 자신이 아닌) 다른 독인가
+fn is_other_dock(next: HWND, this: HWND) -> bool {
+    if next.0.is_null() || next == this {
+        return false;
+    }
+    let mut name = [0u16; 32];
+    let len = unsafe { GetClassNameW(next, &mut name) };
+    len > 0 && String::from_utf16_lossy(&name[..len as usize]) == GLASS_CLASS
+}
+
 fn move_window(hwnd: HWND, r: PxRect) {
     let _ = unsafe { SetWindowPos(hwnd, None, r.0, r.1, r.2, r.3, SWP_NOACTIVATE | SWP_NOZORDER) };
 }
@@ -345,6 +367,7 @@ impl Panel {
             glass: HWND::default(),
             content: HWND::default(),
             gfx: None,
+            gfx_error_logged: false,
             acrylic: false,
             custom: spec.custom_theme,
             blur_on: true,
@@ -498,7 +521,7 @@ impl Panel {
 
     /// 아직 준비되지 않은 것이 있으면 다시 시도 타이머를 건다
     fn arm_retry(&self) {
-        if retry_continues(self.pinned, self.gfx.is_some(), self.pin_retries) {
+        if retry_continues(self.pinned, gfx_settled(self.gfx.is_some(), self.content.0.is_null()), self.pin_retries) {
             unsafe { SetTimer(Some(self.glass), TIMER_RETRY, RETRY_MS, None) };
         }
     }
@@ -516,7 +539,7 @@ impl Panel {
                 self.render();
             }
         }
-        if !retry_continues(self.pinned, self.gfx.is_some(), self.pin_retries) {
+        if !retry_continues(self.pinned, gfx_settled(self.gfx.is_some(), self.content.0.is_null()), self.pin_retries) {
             let _ = unsafe { KillTimer(Some(self.glass), TIMER_RETRY) };
         }
     }
@@ -598,6 +621,10 @@ impl Panel {
         if scale != self.scale {
             logging::info(&format!("배율 변경 {} → {scale}", self.scale));
             self.scale = scale;
+            // 배율이 바뀌면 같은 아이콘이 차지하는 px이 달라지므로 패널 높이를 다시 확인한다
+            if self.mode == Mode::Panel {
+                self.ensure_panel_height();
+            }
             self.place_once();
         }
     }
@@ -880,9 +907,16 @@ impl Panel {
         self.gfx = None;
         let (_, _, w, h) = screen_rect(self.content);
         match Gfx::new(self.content, w as u32, h as u32, self.draw_scale()) {
-            Ok(gfx) => self.gfx = Some(gfx),
+            Ok(gfx) => {
+                self.gfx = Some(gfx);
+                self.gfx_error_logged = false;
+            }
             Err(e) => {
-                logging::error(&format!("그리기 장치를 다시 만들지 못했습니다: {e}"));
+                // 2초마다 되풀이되는 실패가 시작 진단을 밀어내지 않게 처음 한 번만 남긴다
+                if !self.gfx_error_logged {
+                    self.gfx_error_logged = true;
+                    logging::error(&format!("그리기 장치를 다시 만들지 못했습니다: {e}"));
+                }
                 self.arm_retry();
             }
         }
@@ -1345,7 +1379,7 @@ impl Panel {
             }
             PanelCmd::ResetGeometry => {
                 if self.mode == Mode::Panel {
-                    self.panel_rect = default_panel_rect(desktop::primary_work_area(), self.scale);
+                    self.panel_rect = default_panel_rect(desktop::primary_work_area(), desktop::system_scale());
                     self.ensure_panel_height();
                     self.emit_panel_rect();
                 }
@@ -1361,6 +1395,10 @@ impl Panel {
             PanelCmd::Dropped(items) => self.emit(UiEvent::Dropped(items)),
             PanelCmd::SetEditing(on) => self.set_editing(on && self.mode == Mode::Dock),
             PanelCmd::SetDockPlacement { edge, offset, size } => {
+                // 이 독을 끄는 중이면 다른 독의 값이나 저장된 값으로 튀지 않게 무시한다
+                if self.dock.moving.is_some() {
+                    return;
+                }
                 let d = &mut self.dock;
                 if (d.edge, d.offset, d.size) != (edge, offset, size) {
                     (d.edge, d.offset, d.size) = (edge, offset, size);
@@ -1427,9 +1465,12 @@ impl Handler for Panel {
                 self.on_right_click(self.local_point(x, y));
             }
             WM_ACTIVATE => {
-                // 다른 앱으로 포커스가 넘어가면 다시 바탕화면 쪽으로 내린다 (우리 대화상자·메뉴는 제외)
-                if self.pinned && (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && !foreground_is_ours() {
-                    desktop::send_to_bottom(hwnd);
+                // 다른 앱이나 다른 독으로 포커스가 넘어가면 다시 바탕화면 쪽으로 내린다 (우리 대화상자·메뉴는 제외)
+                if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
+                    let next_is_dock = is_other_dock(HWND(lparam.0 as *mut _), hwnd);
+                    if lower_on_deactivate(self.pinned, foreground_is_ours(), next_is_dock) {
+                        desktop::send_to_bottom(hwnd);
+                    }
                 }
                 return None;
             }
@@ -1569,6 +1610,14 @@ mod tests {
         assert!(!retry_continues(false, true, 0));
         assert!(retry_continues(true, false, 0), "그리기 장치는 될 때까지");
         assert!(retry_continues(false, false, 0));
+    }
+
+    #[test]
+    fn deactivation_lowers_for_other_apps_and_other_docks_but_not_our_dialogs() {
+        assert!(lower_on_deactivate(true, false, false), "다른 앱으로");
+        assert!(lower_on_deactivate(true, true, true), "다른 독으로");
+        assert!(!lower_on_deactivate(true, true, false), "우리 대화상자·메뉴");
+        assert!(!lower_on_deactivate(false, false, true), "바탕화면에 붙지 않았으면 내리지 않음");
     }
 
     #[test]
@@ -1753,6 +1802,22 @@ mod window_tests {
         let (_, _, w, height) = screen_rect(h.owner());
         assert!(height > w, "왼쪽 독은 세로로 길다");
         assert!(!events.borrow().iter().any(|e| matches!(e, UiEvent::DockChanged { .. } | UiEvent::DockMoving { .. })));
+        close(&h);
+    }
+
+    #[test]
+    fn placement_command_is_ignored_while_this_dock_is_being_dragged() {
+        let (h, _) = open(spec(Mode::Dock, (0, 0, 200, 200), 3));
+        h.send(PanelCmd::SetEditing(true));
+        pump(50);
+        let glass = h.owner();
+        unsafe { SendMessageW(glass, WM_LBUTTONDOWN, None, Some(LPARAM((20 << 16) | 2))) };
+        h.send(PanelCmd::SetDockPlacement { edge: DockEdge::Left, offset: 0.2, size: 48 });
+        pump(50);
+        let (_, _, w, height) = screen_rect(glass);
+        assert!(w > height, "끄는 중 받은 왼쪽 배치는 적용되지 않는다: {w}x{height}");
+        unsafe { SendMessageW(glass, WM_LBUTTONUP, None, Some(LPARAM((20 << 16) | 2))) };
+        let _ = unsafe { ReleaseCapture() };
         close(&h);
     }
 

@@ -188,7 +188,12 @@ impl Storage {
         }
         let skipped_items = drop_bad_items(&mut value);
         if skipped_items > 0 {
-            let _ = fs::copy(&path, self.dir.join(BACKUP_NAME));
+            // 백업 없이 항목을 지우지 않는다
+            if let Err(e) = fs::copy(&path, self.dir.join(BACKUP_NAME)) {
+                crate::logging::error(&format!("설정 파일을 백업하지 못했습니다: {e}"));
+                self.read_only.set(true);
+                return (Config::default(), LoadReport { read_failed: true, ..Default::default() });
+            }
         }
         match serde_json::from_value::<Config>(value) {
             Ok(mut config) => {
@@ -200,7 +205,12 @@ impl Storage {
     }
 
     fn recover(&self, path: &Path) -> (Config, LoadReport) {
-        let _ = fs::rename(path, self.dir.join(BACKUP_NAME));
+        // 백업하지 못하면 원본을 지킨다: 이번 실행은 저장하지 않는다
+        if let Err(e) = fs::rename(path, self.dir.join(BACKUP_NAME)) {
+            crate::logging::error(&format!("깨진 설정 파일을 백업하지 못했습니다: {e}"));
+            self.read_only.set(true);
+            return (Config::default(), LoadReport { read_failed: true, ..Default::default() });
+        }
         (Config::default(), LoadReport { recovered: true, ..Default::default() })
     }
 
@@ -469,5 +479,35 @@ mod tests {
         assert!(dir.join(CONFIG_NAME).is_dir(), "이번 실행은 저장하지 않는다");
         assert!(!dir.join("config.json.tmp").exists());
         assert!(!dir.join(BACKUP_NAME).exists());
+    }
+
+    #[test]
+    fn failed_backup_of_corrupt_file_keeps_the_original() {
+        let dir = temp_dir("backup-fail-corrupt");
+        fs::write(dir.join(CONFIG_NAME), b"{not json").unwrap();
+        // 백업 이름이 폴더면 옮기기가 실패한다
+        fs::create_dir(dir.join(BACKUP_NAME)).unwrap();
+        let storage = Storage::new(&dir);
+        let (config, report) = storage.load();
+        assert_eq!(config, Config::default());
+        assert!(report.read_failed);
+        assert!(!report.recovered);
+        storage.save(&Config { locked: true, ..Config::default() }).unwrap();
+        assert_eq!(fs::read(dir.join(CONFIG_NAME)).unwrap(), b"{not json");
+    }
+
+    #[test]
+    fn failed_backup_before_skipping_items_keeps_the_original() {
+        let dir = temp_dir("backup-fail-skip");
+        let text = r#"{"schema":2,"items":[{"kind":"hologram","id":"h"}]}"#;
+        fs::write(dir.join(CONFIG_NAME), text).unwrap();
+        fs::create_dir(dir.join(BACKUP_NAME)).unwrap();
+        let storage = Storage::new(&dir);
+        let (config, report) = storage.load();
+        assert_eq!(config, Config::default());
+        assert!(report.read_failed);
+        assert_eq!(report.skipped_items, 0);
+        storage.save(&Config { locked: true, ..Config::default() }).unwrap();
+        assert_eq!(fs::read_to_string(dir.join(CONFIG_NAME)).unwrap(), text);
     }
 }

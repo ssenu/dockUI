@@ -761,6 +761,12 @@ impl App {
                 Err(e) => logging::warn(&format!("보조 독을 만들지 못했습니다: {e}")),
             }
         }
+        // 끌던 보조 독이 닫혀 끌기가 끝났으면 주 독만 저장 안 된 위치에 남는다: 설정값으로 맞춘다.
+        // 주 독이 직접 끄는 중이면 독이 알아서 무시한다.
+        let (edge, offset, size) = (self.config.dock_edge, self.config.dock_offset, self.config.dock_size);
+        if let Some(panel) = &self.panel {
+            panel.send(PanelCmd::SetDockPlacement { edge, offset, size });
+        }
     }
 
     fn post_event(&self) -> impl Fn(Event) + Send + 'static {
@@ -774,7 +780,13 @@ impl App {
     }
 
     fn dialog_owner(&self, from: PanelId) -> HWND {
-        self.handle_of(from).or(self.panel.as_ref()).map(PanelHandle::owner).unwrap_or(self.hwnd)
+        // 이미 닫힌 독을 소유자로 넘기면 대화상자가 조용히 열리지 않는다: 살아 있는 첫 창을 쓴다
+        [self.handle_of(from), self.panel.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(PanelHandle::owner)
+            .find(|w| unsafe { IsWindow(Some(*w)) }.as_bool())
+            .unwrap_or(self.hwnd)
     }
 
     /// 대화상자·확인 창을 띄우는 동안 소유 창을 뺀 모든 독을 막는다.
