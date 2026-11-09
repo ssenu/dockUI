@@ -164,6 +164,14 @@ pub fn appdata_dir() -> PathBuf {
     std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// 지금 쓰이는 데이터 폴더를 옮기지 않고 고른다: 새 폴더 > 옛 폴더 > 새 폴더(둘 다 없음).
+/// 이미 실행 중인 경우 로그를 열 폴더로 쓴다.
+pub fn current_data_dir(base: &Path) -> PathBuf {
+    let new = base.join(DATA_DIR_NAME);
+    let legacy = base.join(LEGACY_DATA_DIR_NAME);
+    if !new.exists() && legacy.exists() { legacy } else { new }
+}
+
 /// 쓸 데이터 폴더를 정하고, 필요하면 옛 폴더를 옮긴다. (폴더, 로그에 남길 한 줄)
 /// 옮기기에 실패하면 이번 실행은 옛 폴더를 쓰고 다음 실행 때 다시 시도한다 (복사해서 두 벌을 만들지 않는다).
 /// 로그를 열기 전에 불리므로 결과는 부른 쪽이 로그에 남긴다.
@@ -586,5 +594,31 @@ mod tests {
         let empty = temp_dir("fresh");
         assert_eq!(prepare_data_dir(&empty), (empty.join(DATA_DIR_NAME), None));
         assert!(!empty.join(DATA_DIR_NAME).exists());
+    }
+
+    #[test]
+    fn current_data_dir_picks_without_moving() {
+        let base = temp_dir("current");
+        assert_eq!(current_data_dir(&base), base.join(DATA_DIR_NAME));
+        fs::create_dir_all(base.join(LEGACY_DATA_DIR_NAME)).unwrap();
+        assert_eq!(current_data_dir(&base), base.join(LEGACY_DATA_DIR_NAME));
+        assert!(!base.join(DATA_DIR_NAME).exists(), "옮기지 않는다");
+        fs::create_dir_all(base.join(DATA_DIR_NAME)).unwrap();
+        assert_eq!(current_data_dir(&base), base.join(DATA_DIR_NAME));
+    }
+
+    #[test]
+    fn failed_rename_falls_back_to_legacy_dir() {
+        let base = temp_dir("rename-fail");
+        let legacy = base.join(LEGACY_DATA_DIR_NAME);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join(CONFIG_NAME), "{}").unwrap();
+        // 윈도우는 열린 파일이 있는 폴더의 이름을 바꾸지 못한다
+        let _held = std::fs::File::open(legacy.join(CONFIG_NAME)).unwrap();
+        let (dir, note) = prepare_data_dir(&base);
+        assert_eq!(dir, legacy);
+        assert!(note.is_some_and(|n| n.contains("옮기지 못해")));
+        assert!(legacy.exists());
+        assert!(!base.join(DATA_DIR_NAME).exists());
     }
 }
