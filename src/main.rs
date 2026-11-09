@@ -23,8 +23,11 @@ fn main() {
         std::process::exit(icons::run_fetch_process(&args[2..]));
     }
 
-    let data_dir = config::default_dir();
+    let (data_dir, moved) = config::prepare_data_dir(&config::appdata_dir());
     logging::init(&data_dir.join("logs"));
+    if let Some(note) = moved {
+        logging::info(&note);
+    }
 
     // 핸들은 프로세스가 끝날 때까지 쥐고 있는다 (설치 프로그램이 실행 중 감지에 씀)
     let (_mutex, existed) = acquire_mutex(MUTEX_NAME);

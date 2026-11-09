@@ -1,4 +1,4 @@
-//! 설정 파일(`%APPDATA%\YT-Launcher\config.json`) 읽기·쓰기와 0.1.x(schema 1) 변환.
+//! 설정 파일(`%APPDATA%\DockUI\config.json`) 읽기·쓰기, 0.1.x(schema 1) 변환, 옛 데이터 폴더 이전.
 
 use crate::items::Item;
 use serde::{Deserialize, Serialize};
@@ -140,9 +140,50 @@ pub struct LoadReport {
     pub read_failed: bool,
 }
 
-pub fn default_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    base.join("YT-Launcher")
+/// 데이터 폴더 이름 (`%APPDATA%` 아래)
+pub const DATA_DIR_NAME: &str = "DockUI";
+/// 0.2.x까지 쓰던 데이터 폴더 이름. 처음 실행 때 새 이름으로 옮긴다
+pub const LEGACY_DATA_DIR_NAME: &str = "YT-Launcher";
+
+/// 데이터 폴더를 정하는 방법
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataDirPlan {
+    /// 새 폴더를 쓴다 (이미 있거나 처음 설치)
+    UseNew,
+    /// 옛 폴더를 새 이름으로 옮긴다
+    MoveLegacy,
+}
+
+/// 새 폴더가 없고 옛 폴더가 있을 때만 옮긴다 (순수 함수). 둘 다 있으면 새 폴더를 쓰고 옛 폴더는 건드리지 않는다.
+pub fn plan_data_dir(new_exists: bool, legacy_exists: bool) -> DataDirPlan {
+    if !new_exists && legacy_exists { DataDirPlan::MoveLegacy } else { DataDirPlan::UseNew }
+}
+
+/// `%APPDATA%` (없으면 현재 폴더)
+pub fn appdata_dir() -> PathBuf {
+    std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// 쓸 데이터 폴더를 정하고, 필요하면 옛 폴더를 옮긴다. (폴더, 로그에 남길 한 줄)
+/// 옮기기에 실패하면 이번 실행은 옛 폴더를 쓰고 다음 실행 때 다시 시도한다 (복사해서 두 벌을 만들지 않는다).
+/// 로그를 열기 전에 불리므로 결과는 부른 쪽이 로그에 남긴다.
+pub fn prepare_data_dir(base: &Path) -> (PathBuf, Option<String>) {
+    let new = base.join(DATA_DIR_NAME);
+    let legacy = base.join(LEGACY_DATA_DIR_NAME);
+    match plan_data_dir(new.exists(), legacy.exists()) {
+        DataDirPlan::UseNew => (new, None),
+        DataDirPlan::MoveLegacy => match fs::rename(&legacy, &new) {
+            Ok(()) => (
+                new,
+                Some(format!(
+                    "데이터 폴더를 옮겼습니다: {} → {}",
+                    legacy.display(),
+                    base.join(DATA_DIR_NAME).display()
+                )),
+            ),
+            Err(e) => (legacy, Some(format!("데이터 폴더를 옮기지 못해 옛 폴더를 씁니다: {e}"))),
+        },
+    }
 }
 
 pub struct Storage {
@@ -509,5 +550,41 @@ mod tests {
         assert_eq!(report.skipped_items, 0);
         storage.save(&Config { locked: true, ..Config::default() }).unwrap();
         assert_eq!(fs::read_to_string(dir.join(CONFIG_NAME)).unwrap(), text);
+    }
+
+    #[test]
+    fn data_dir_moves_only_when_new_is_missing_and_legacy_exists() {
+        assert_eq!(plan_data_dir(false, true), DataDirPlan::MoveLegacy);
+        assert_eq!(plan_data_dir(true, true), DataDirPlan::UseNew);
+        assert_eq!(plan_data_dir(true, false), DataDirPlan::UseNew);
+        assert_eq!(plan_data_dir(false, false), DataDirPlan::UseNew);
+    }
+
+    #[test]
+    fn legacy_data_dir_is_moved_with_its_contents() {
+        let base = temp_dir("move");
+        fs::create_dir_all(base.join(LEGACY_DATA_DIR_NAME).join("icons")).unwrap();
+        fs::write(base.join(LEGACY_DATA_DIR_NAME).join(CONFIG_NAME), r#"{"schema":2,"locked":true}"#).unwrap();
+        let (dir, note) = prepare_data_dir(&base);
+        assert_eq!(dir, base.join(DATA_DIR_NAME));
+        assert!(note.is_some_and(|n| n.contains("옮겼습니다")));
+        assert!(!base.join(LEGACY_DATA_DIR_NAME).exists());
+        assert!(dir.join("icons").is_dir());
+        let (config, _) = Storage::new(&dir).load();
+        assert!(config.locked, "설정이 그대로");
+    }
+
+    #[test]
+    fn existing_new_data_dir_wins_and_legacy_is_left_alone() {
+        let base = temp_dir("both");
+        fs::create_dir_all(base.join(DATA_DIR_NAME)).unwrap();
+        fs::create_dir_all(base.join(LEGACY_DATA_DIR_NAME)).unwrap();
+        let (dir, note) = prepare_data_dir(&base);
+        assert_eq!((dir, note), (base.join(DATA_DIR_NAME), None));
+        assert!(base.join(LEGACY_DATA_DIR_NAME).exists());
+        // 처음 설치: 아무것도 없으면 새 폴더 경로만 돌려주고 만들지 않는다 (저장할 때 만든다)
+        let empty = temp_dir("fresh");
+        assert_eq!(prepare_data_dir(&empty), (empty.join(DATA_DIR_NAME), None));
+        assert!(!empty.join(DATA_DIR_NAME).exists());
     }
 }
