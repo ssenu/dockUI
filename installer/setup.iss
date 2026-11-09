@@ -72,6 +72,12 @@ const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   RunValue = 'DockUI';
   LegacyRunValue = 'YTLauncher';
+  ApprovedKey = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';
+  UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F3C2A71-5B4E-4C9D-9A16-3E7D2B0C5F48}_is1';
+
+var
+  { 설치 전에 읽은 옛 설치 위치 }
+  LegacyAppDir: String;
 
 procedure CloseRunningApp(WaitFirst: Boolean);
 var
@@ -91,8 +97,10 @@ begin
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#AppExe} /IM {#LegacyExe}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
-{ 앱 메뉴로 켠 옛 자동 실행 값을 새 이름·새 경로로 옮긴다 }
+{ 앱 메뉴로 켠 옛 자동 실행 값을 새 이름·새 경로로 옮긴다. 작업 관리자 "시작 앱"에서 끈 상태(StartupApproved)도 함께 옮긴다 }
 procedure MoveLegacyAutostart;
+var
+  Approved: AnsiString;
 begin
   if RegValueExists(HKEY_CURRENT_USER, RunKey, LegacyRunValue) then
   begin
@@ -100,16 +108,85 @@ begin
     if not RegValueExists(HKEY_CURRENT_USER, RunKey, RunValue) then
       RegWriteStringValue(HKEY_CURRENT_USER, RunKey, RunValue, '"' + ExpandConstant('{app}\{#AppExe}') + '"');
   end;
+  if RegValueExists(HKEY_CURRENT_USER, ApprovedKey, LegacyRunValue) then
+  begin
+    if (not RegValueExists(HKEY_CURRENT_USER, ApprovedKey, RunValue)) and
+       RegQueryBinaryValue(HKEY_CURRENT_USER, ApprovedKey, LegacyRunValue, Approved) then
+      RegWriteBinaryValue(HKEY_CURRENT_USER, ApprovedKey, RunValue, Approved);
+    RegDeleteValue(HKEY_CURRENT_USER, ApprovedKey, LegacyRunValue);
+  end;
 end;
 
-{ 0.2.x 설치 폴더(옛 실행 파일·옛 제거 프로그램)를 지운다. 실패해도 설치는 성공으로 둔다 }
+{ 설치 정보가 덮어써지기 전에 옛 설치 위치를 읽는다 (사용자 지정 위치일 수 있다) }
+function InitializeSetup(): Boolean;
+var
+  Path: String;
+begin
+  LegacyAppDir := ExpandConstant('{#LegacyDir}');
+  if RegQueryStringValue(HKEY_CURRENT_USER, UninstallKey, 'Inno Setup: App Path', Path) and (Trim(Path) <> '') then
+    LegacyAppDir := RemoveBackslashUnlessRoot(Trim(Path));
+  Result := True;
+end;
+
+{ 작업 표시줄에 고정된 옛 실행 파일 바로가기를 새 실행 파일로 고친다. 실패해도 설치를 막지 않는다 }
+procedure FixPinnedShortcuts;
+var
+  Dir, OldExe, Lnk: String;
+  FindRec: TFindRec;
+  Shell, Link: Variant;
+begin
+  try
+    Dir := ExpandConstant('{userappdata}\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar');
+    OldExe := AddBackslash(LegacyAppDir) + '{#LegacyExe}';
+    if not DirExists(Dir) then
+      Exit;
+    Shell := CreateOleObject('WScript.Shell');
+    if FindFirst(AddBackslash(Dir) + '*.lnk', FindRec) then
+    begin
+      try
+        repeat
+          Lnk := AddBackslash(Dir) + FindRec.Name;
+          try
+            Link := Shell.CreateShortcut(Lnk);
+            if CompareText(String(Link.TargetPath), OldExe) = 0 then
+            begin
+              Link.TargetPath := ExpandConstant('{app}\{#AppExe}');
+              Link.WorkingDirectory := ExpandConstant('{app}');
+              Link.Save;
+            end;
+          except
+          end;
+        until not FindNext(FindRec);
+      finally
+        FindClose(FindRec);
+      end;
+    end;
+  except
+  end;
+end;
+
+{ 0.2.x 설치 폴더(옛 실행 파일·옛 제거 프로그램)를 정리한다. 통째로 지우지 않고 아는 파일만 지운다.
+  실패해도 설치는 성공으로 둔다 }
 procedure RemoveLegacyInstallDir;
 var
-  Legacy: String;
+  Legacy, Internal: String;
 begin
-  Legacy := ExpandConstant('{#LegacyDir}');
-  if (CompareText(Legacy, ExpandConstant('{app}')) <> 0) and DirExists(Legacy) then
-    DelTree(Legacy, True, True, True);
+  try
+    Legacy := LegacyAppDir;
+    if (CompareText(RemoveBackslashUnlessRoot(Legacy), RemoveBackslashUnlessRoot(ExpandConstant('{app}'))) = 0) or
+       not FileExists(AddBackslash(Legacy) + '{#LegacyExe}') then
+      Exit;
+    DeleteFile(AddBackslash(Legacy) + '{#LegacyExe}');
+    DeleteFile(AddBackslash(Legacy) + 'unins000.exe');
+    DeleteFile(AddBackslash(Legacy) + 'unins000.dat');
+    DeleteFile(AddBackslash(Legacy) + 'unins000.msg');
+    { 0.1.x가 남긴 _internal 폴더 }
+    Internal := AddBackslash(Legacy) + '_internal';
+    if DirExists(Internal) then
+      DelTree(Internal, True, True, True);
+    RemoveDir(Legacy);
+  except
+  end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -123,6 +200,7 @@ begin
   if CurStep = ssPostInstall then
   begin
     MoveLegacyAutostart;
+    FixPinnedShortcuts;
     RemoveLegacyInstallDir;
   end;
 end;
@@ -140,5 +218,7 @@ begin
   begin
     RegDeleteValue(HKEY_CURRENT_USER, RunKey, RunValue);
     RegDeleteValue(HKEY_CURRENT_USER, RunKey, LegacyRunValue);
+    RegDeleteValue(HKEY_CURRENT_USER, ApprovedKey, RunValue);
+    RegDeleteValue(HKEY_CURRENT_USER, ApprovedKey, LegacyRunValue);
   end;
 end;

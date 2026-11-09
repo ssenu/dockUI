@@ -54,7 +54,7 @@ jobs:
           $lines = @(Get-Content "$dir/SHA256SUMS.txt" | Where-Object { $_ })
           if ($lines.Count -ne 2) { throw "SHA256SUMS.txt 줄 수 오류: $($lines.Count)" }
           for ($i = 0; $i -lt 2; $i++) {
-            if ($lines[$i] -notmatch "^[0-9a-f]{64}  $([regex]::Escape($names[$i]))$") { throw "SHA256SUMS.txt 형식 오류: $($lines[$i])" }
+            if ($lines[$i] -cnotmatch "^[0-9a-f]{64}  $([regex]::Escape($names[$i]))$") { throw "SHA256SUMS.txt 형식 오류: $($lines[$i])" }
           }
       - name: Release notes
         env:
