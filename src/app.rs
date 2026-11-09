@@ -1049,7 +1049,7 @@ impl App {
         let send = self.post_event();
         let report = self.post_event();
         std::thread::spawn(move || {
-            let dir = std::env::temp_dir().join("YT-Launcher-update");
+            let dir = std::env::temp_dir().join("DockUI-update");
             let _ = std::fs::remove_dir_all(&dir);
             // 진행률은 1% 바뀔 때만 알린다
             let mut last = None;

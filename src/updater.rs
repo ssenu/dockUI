@@ -1,7 +1,8 @@
 //! GitHub Releases 기반 업데이트: 최신 릴리스 확인 → 설치 파일 다운로드·SHA-256 검증 → 조용한 설치 실행.
 //!
-//! 0.1.x(파이썬) 업데이터와 같은 규칙을 지킨다: 정식 릴리스, `YT-Launcher-Setup-<버전>.exe`,
-//! `SHA256SUMS.txt`(`<소문자 해시>  <파일명>`), `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
+//! 설치 파일은 `DockUI-Setup-<버전>.exe`. 0.2.x 이하 앱은 옛 이름 `YT-Launcher-Setup-<버전>.exe`만 찾으므로
+//! 릴리스는 같은 파일을 옛 이름으로도 올리고, 이 업데이터는 둘 다 알아보되 새 이름을 먼저 쓴다.
+//! `SHA256SUMS.txt`(`<소문자 해시>  <파일명>`), `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`는 그대로다.
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -13,7 +14,9 @@ use std::time::Duration;
 
 pub const REPO: &str = "ssenu/dockUI";
 pub const SUMS_NAME: &str = "SHA256SUMS.txt";
-pub const INSTALLER_PREFIX: &str = "YT-Launcher-Setup-";
+pub const INSTALLER_PREFIX: &str = "DockUI-Setup-";
+/// 0.2.x 이하가 찾는 옛 설치 파일 이름 (릴리스에 같은 파일을 함께 올린다)
+pub const LEGACY_INSTALLER_PREFIX: &str = "YT-Launcher-Setup-";
 pub const SILENT_ARGS: [&str; 3] = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"];
 const CHUNK: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -86,7 +89,7 @@ impl UreqHttp {
         let agent = ureq::Agent::config_builder()
             .tls_config(tls)
             .timeout_global(Some(TIMEOUT))
-            .user_agent(format!("YT-Launcher/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("DockUI/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
         UreqHttp { agent }
@@ -113,8 +116,8 @@ pub fn api_url(repo: &str) -> String {
     format!("https://api.github.com/repos/{repo}/releases/latest")
 }
 
-fn is_installer_name(name: &str) -> bool {
-    name.strip_prefix(INSTALLER_PREFIX).and_then(|rest| rest.strip_suffix(".exe")).is_some_and(|ver| {
+fn is_installer_name(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).and_then(|rest| rest.strip_suffix(".exe")).is_some_and(|ver| {
         !ver.is_empty() && ver.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
     })
 }
@@ -130,6 +133,7 @@ pub fn parse_release(data: &Value) -> Option<Release> {
         return None;
     }
     let mut installer = None;
+    let mut legacy = None;
     let mut sums = None;
     for a in data.get("assets").and_then(Value::as_array).into_iter().flatten() {
         let (Some(name), Some(url)) =
@@ -142,17 +146,19 @@ pub fn parse_release(data: &Value) -> Option<Release> {
             url: url.to_string(),
             size: a.get("size").and_then(Value::as_u64).unwrap_or(0),
         };
-        if installer.is_none() && is_installer_name(name) {
-            installer = Some(asset);
-        } else if name == SUMS_NAME {
+        if name == SUMS_NAME {
             sums = Some(asset);
+        } else if installer.is_none() && is_installer_name(name, INSTALLER_PREFIX) {
+            installer = Some(asset);
+        } else if legacy.is_none() && is_installer_name(name, LEGACY_INSTALLER_PREFIX) {
+            legacy = Some(asset);
         }
     }
     Some(Release {
         version: tag.trim_start_matches(['v', 'V']).to_string(),
         tag,
         html_url: data.get("html_url").and_then(Value::as_str).unwrap_or("").to_string(),
-        installer,
+        installer: installer.or(legacy),
         sums,
         notes: data.get("body").and_then(Value::as_str).unwrap_or("").to_string(),
     })
@@ -445,12 +451,41 @@ mod tests {
     }
 
     #[test]
-    fn installer_name_rule_matches_v1_updater() {
-        assert!(is_installer_name("YT-Launcher-Setup-0.2.0.exe"));
-        assert!(is_installer_name("YT-Launcher-Setup-1.0.0-rc_1.exe"));
-        assert!(!is_installer_name("YT-Launcher-Setup-.exe"));
-        assert!(!is_installer_name("YT-Launcher-Setup-0.2.0.exe.sig"));
-        assert!(!is_installer_name("YT-Launcher-Setup-../x.exe"));
+    fn installer_name_rule_accepts_new_and_legacy_prefix() {
+        for prefix in [INSTALLER_PREFIX, LEGACY_INSTALLER_PREFIX] {
+            assert!(is_installer_name(&format!("{prefix}0.2.0.exe"), prefix));
+            assert!(is_installer_name(&format!("{prefix}1.0.0-rc_1.exe"), prefix));
+            assert!(!is_installer_name(&format!("{prefix}.exe"), prefix));
+            assert!(!is_installer_name(&format!("{prefix}0.2.0.exe.sig"), prefix));
+            assert!(!is_installer_name(&format!("{prefix}../x.exe"), prefix));
+        }
+        assert!(!is_installer_name("DockUI-Setup-0.3.0.exe", LEGACY_INSTALLER_PREFIX));
+    }
+
+    fn release_with(names: &[&str]) -> Value {
+        let assets: Vec<Value> = names
+            .iter()
+            .map(|n| json!({"name": n, "browser_download_url": format!("https://dl/{n}"), "size": 1}))
+            .collect();
+        json!({"tag_name": "v0.3.0", "draft": false, "prerelease": false, "assets": assets})
+    }
+
+    #[test]
+    fn prefers_new_installer_name_and_falls_back_to_legacy() {
+        let both = release_with(&["YT-Launcher-Setup-0.3.0.exe", "DockUI-Setup-0.3.0.exe", "SHA256SUMS.txt"]);
+        assert_eq!(parse_release(&both).unwrap().installer.unwrap().name, "DockUI-Setup-0.3.0.exe");
+        let legacy = release_with(&["YT-Launcher-Setup-0.2.9.exe", "SHA256SUMS.txt"]);
+        assert_eq!(parse_release(&legacy).unwrap().installer.unwrap().name, "YT-Launcher-Setup-0.2.9.exe");
+        let new_only = release_with(&["DockUI-Setup-0.3.0.exe", "SHA256SUMS.txt"]);
+        assert!(parse_release(&new_only).unwrap().is_installable());
+    }
+
+    #[test]
+    fn sums_with_both_names_find_the_chosen_installer() {
+        let text = format!("{INSTALLER_SHA}  DockUI-Setup-0.3.0.exe\n{INSTALLER_SHA}  YT-Launcher-Setup-0.3.0.exe\n");
+        let sums = parse_sums(&text);
+        assert_eq!(sums["DockUI-Setup-0.3.0.exe"], INSTALLER_SHA);
+        assert_eq!(sums["YT-Launcher-Setup-0.3.0.exe"], INSTALLER_SHA);
     }
 
     #[test]
