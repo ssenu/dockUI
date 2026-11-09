@@ -36,7 +36,7 @@ jobs:
           $text = $regex.Replace($text, "version = `"$version`"", 1)
           Set-Content $file $text -Encoding utf8NoBOM -NoNewline
           $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $actual = ($meta.packages | Where-Object name -eq "yt-launcher").version
+          $actual = ($meta.packages | Where-Object name -eq "dock-ui").version
           if ($actual -ne $version) { throw "Cargo.toml 버전 반영 실패: $actual" }
           "APP_VERSION=$version" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
       - name: Install Inno Setup
@@ -49,10 +49,13 @@ jobs:
       - name: Check asset names
         run: |
           $dir = "dist/installer"
-          $setup = "YT-Launcher-Setup-$env:APP_VERSION.exe"
-          if (-not (Test-Path "$dir/$setup")) { throw "설치 파일 이름이 규칙과 다릅니다" }
-          $line = (Get-Content "$dir/SHA256SUMS.txt" -Raw).Trim()
-          if ($line -notmatch "^[0-9a-f]{64}  $([regex]::Escape($setup))$") { throw "SHA256SUMS.txt 형식 오류: $line" }
+          $names = @("DockUI-Setup-$env:APP_VERSION.exe", "YT-Launcher-Setup-$env:APP_VERSION.exe")
+          foreach ($n in $names) { if (-not (Test-Path "$dir/$n")) { throw "설치 파일이 없습니다: $n" } }
+          $lines = @(Get-Content "$dir/SHA256SUMS.txt" | Where-Object { $_ })
+          if ($lines.Count -ne 2) { throw "SHA256SUMS.txt 줄 수 오류: $($lines.Count)" }
+          for ($i = 0; $i -lt 2; $i++) {
+            if ($lines[$i] -notmatch "^[0-9a-f]{64}  $([regex]::Escape($names[$i]))$") { throw "SHA256SUMS.txt 형식 오류: $($lines[$i])" }
+          }
       - name: Release notes
         env:
           TAG: ${{ github.ref_name }}
@@ -68,7 +71,9 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          name: Dock UI v${{ env.APP_VERSION }}
           files: |
+            dist/installer/DockUI-Setup-${{ env.APP_VERSION }}.exe
             dist/installer/YT-Launcher-Setup-${{ env.APP_VERSION }}.exe
             dist/installer/SHA256SUMS.txt
           fail_on_unmatched_files: true

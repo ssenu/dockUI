@@ -26,10 +26,10 @@ cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
 # 설치 프로그램이 묶는 폴더: exe 하나 (글꼴·아이콘은 exe 안에 들어 있다)
-$stage = Join-Path $root "dist\YTLauncher"
+$stage = Join-Path $root "dist\DockUI"
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage | Out-Null
-Copy-Item (Join-Path $root "target\release\YTLauncher.exe") $stage
+Copy-Item (Join-Path $root "target\release\DockUI.exe") $stage
 
 $iscc = $null
 $command = Get-Command iscc.exe -ErrorAction SilentlyContinue
@@ -46,9 +46,13 @@ if (-not $iscc) { throw "ISCC.exe를 찾을 수 없습니다. Inno Setup 6을 �
 & $iscc "/DAppVersion=$Version" "installer\setup.iss"
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
-$setupName = "YT-Launcher-Setup-$Version.exe"
-$setupPath = Join-Path $root "dist\installer\$setupName"
+$setupName = "DockUI-Setup-$Version.exe"
+$legacyName = "YT-Launcher-Setup-$Version.exe"
+$installerDir = Join-Path $root "dist\installer"
+$setupPath = Join-Path $installerDir $setupName
 if (-not (Test-Path $setupPath)) { throw "설치 프로그램이 없습니다: $setupPath" }
+# 0.2.x 이하 앱은 옛 이름의 설치 파일만 찾는다: 같은 파일을 옛 이름으로도 둔다
+Copy-Item $setupPath (Join-Path $installerDir $legacyName) -Force
 $hash = (Get-FileHash $setupPath -Algorithm SHA256).Hash.ToLower()
-"$hash  $setupName" | Set-Content (Join-Path $root "dist\installer\SHA256SUMS.txt") -Encoding ascii
-Write-Host "Done: $setupPath"
+@("$hash  $setupName", "$hash  $legacyName") | Set-Content (Join-Path $installerDir "SHA256SUMS.txt") -Encoding ascii
+Write-Host "Done: $setupPath (+ $legacyName)"
