@@ -40,7 +40,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, w};
 
-/// 화면에 보이는 이름 (exe·설치 파일·데이터 폴더 이름은 업데이트 호환을 위해 그대로 둔다)
+/// 화면에 보이는 이름
 pub const APP_NAME: &str = "Dock UI";
 /// 알림·작업 표시줄이 이 앱을 알아보는 ID (설치 바로가기에도 같은 값)
 pub const APP_ID: &str = "ssenu.DockUI";
@@ -1582,8 +1582,8 @@ mod tests {
     #[test]
     fn windows_are_disabled_only_during_the_call() {
         use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
-        let a = crate::win::msg_window::create("YTLauncherTestModalA", Box::new(Quiet)).unwrap();
-        let b = crate::win::msg_window::create("YTLauncherTestModalB", Box::new(Quiet)).unwrap();
+        let a = crate::win::msg_window::create("DockUITestModalA", Box::new(Quiet)).unwrap();
+        let b = crate::win::msg_window::create("DockUITestModalB", Box::new(Quiet)).unwrap();
         let during = with_disabled(&[a, b], || unsafe { (IsWindowEnabled(a).as_bool(), IsWindowEnabled(b).as_bool()) });
         assert_eq!(during, (false, false));
         assert!(unsafe { IsWindowEnabled(a) }.as_bool() && unsafe { IsWindowEnabled(b) }.as_bool());

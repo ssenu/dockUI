@@ -5,9 +5,9 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow, FindWindowW, PostMessageW, WM_APP};
 use windows::core::HSTRING;
 
-pub const MUTEX_NAME: &str = "YTLauncherMutex";
+pub const MUTEX_NAME: &str = "DockUIMutex";
 /// 트레이·메시지를 받는 숨은 창의 클래스 이름
-pub const MESSAGE_CLASS: &str = "YTLauncherMsg";
+pub const MESSAGE_CLASS: &str = "DockUIMsg";
 /// 두 번째 실행이 기존 인스턴스에 보내는 "런처 보이기" 요청
 pub const WM_APP_SHOW: u32 = WM_APP + 1;
 
@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn second_acquire_reports_existing() {
-        let name = format!("YTLauncherTest-{}", crate::items::new_id());
+        let name = format!("DockUITest-{}", crate::items::new_id());
         let (first, existed1) = acquire_mutex(&name);
         assert!(first.is_some());
         assert!(!existed1);

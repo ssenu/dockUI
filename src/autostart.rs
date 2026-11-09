@@ -1,9 +1,9 @@
-//! 윈도우 시작 시 자동 실행 (HKCU Run 키의 `YTLauncher` 값). 설치 프로그램과 같은 값을 쓴다.
+//! 윈도우 시작 시 자동 실행 (HKCU Run 키의 `DockUI` 값). 설치 프로그램과 같은 값을 쓴다.
 
 use crate::win::reg::{self, HKEY_CURRENT_USER};
 
 pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-pub const VALUE_NAME: &str = "YTLauncher";
+pub const VALUE_NAME: &str = "DockUI";
 
 pub trait RunBackend {
     fn get(&self) -> Option<String>;
@@ -91,9 +91,9 @@ mod tests {
 
     #[test]
     fn real_run_key_roundtrip() {
-        let backend = RegistryRun { value_name: format!("YTLauncherTest{}", crate::items::new_id()) };
-        backend.set("\"C:\\nonexistent\\yt-launcher-test.exe\"").unwrap();
-        assert_eq!(backend.get().as_deref(), Some("\"C:\\nonexistent\\yt-launcher-test.exe\""));
+        let backend = RegistryRun { value_name: format!("DockUITest{}", crate::items::new_id()) };
+        backend.set("\"C:\\nonexistent\\dock-ui-test.exe\"").unwrap();
+        assert_eq!(backend.get().as_deref(), Some("\"C:\\nonexistent\\dock-ui-test.exe\""));
         backend.delete();
         assert_eq!(backend.get(), None);
     }

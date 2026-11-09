@@ -1,11 +1,11 @@
 [package]
-name = "yt-launcher"
-version = "0.2.0"
+name = "dock-ui"
+version = "0.3.0"
 edition = "2024"
 description = "바탕화면 독에서 유튜브·앱·웹 주소를 여는 런처"
 
 [[bin]]
-name = "YTLauncher"
+name = "DockUI"
 path = "src/main.rs"
 
 [dependencies]

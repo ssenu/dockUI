@@ -1,4 +1,4 @@
-//! 아이콘 캐시(`%APPDATA%\YT-Launcher\icons\<항목id>.png`): 앱 아이콘 추출, 웹 파비콘 받기.
+//! 아이콘 캐시(`%APPDATA%\DockUI\icons\<항목id>.png`): 앱 아이콘 추출, 웹 파비콘 받기.
 
 use crate::items::{Item, authority_of};
 use crate::updater::{Http, UreqHttp};
@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Imaging::{
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx};
 use windows::core::{GUID, HSTRING, Interface};
 
-/// 아이콘 만들기 하위 프로세스를 부르는 인자: `YTLauncher.exe --fetch-icons <데이터 폴더> <항목 JSON>`
+/// 아이콘 만들기 하위 프로세스를 부르는 인자: `DockUI.exe --fetch-icons <데이터 폴더> <항목 JSON>`
 pub const FETCH_ARG: &str = "--fetch-icons";
 
 /// 저장하는 아이콘 크기 (px)

@@ -28,8 +28,8 @@ BEGIN
       VALUE "CompanyName", "ssenu"
       VALUE "FileDescription", "Dock UI"
       VALUE "FileVersion", "{version}"
-      VALUE "InternalName", "YTLauncher"
-      VALUE "OriginalFilename", "YTLauncher.exe"
+      VALUE "InternalName", "DockUI"
+      VALUE "OriginalFilename", "DockUI.exe"
       VALUE "ProductName", "Dock UI"
       VALUE "ProductVersion", "{version}"
     END

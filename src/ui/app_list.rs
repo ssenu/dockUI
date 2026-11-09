@@ -32,7 +32,7 @@ use windows::core::{HSTRING, PWSTR};
 
 pub use crate::win::shell_items::AppEntry as AppChoice;
 
-const PICKER_CLASS: &str = "YTLauncherAppPicker";
+const PICKER_CLASS: &str = "DockUIAppPicker";
 const ID_SEARCH: i32 = 201;
 const ID_LIST: i32 = 202;
 const ID_STATUS: i32 = 203;
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn loads_list_and_picks_selected_app() {
         let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        let owner = create("YTLauncherTestPickerOwner", Box::new(Owner)).unwrap();
+        let owner = create("DockUITestPickerOwner", Box::new(Owner)).unwrap();
         // 목록이 채워지면 [선택]을 누른다: 첫 줄이 자동으로 선택돼 있다
         std::thread::spawn(|| {
             for _ in 0..400 {

@@ -113,6 +113,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dock-ui"
+version = "0.3.0"
+dependencies = [
+ "embed-resource",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+ "windows",
+ "windows-core",
+ "windows-numerics",
+]
+
+[[package]]
 name = "embed-resource"
 version = "3.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -789,20 +803,6 @@ checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
  "windows-sys",
-]
-
-[[package]]
-name = "yt-launcher"
-version = "0.2.0"
-dependencies = [
- "embed-resource",
- "serde",
- "serde_json",
- "sha2",
- "ureq",
- "windows",
- "windows-core",
- "windows-numerics",
 ]
 
 [[package]]

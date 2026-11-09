@@ -1,5 +1,5 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
-//! YT Launcher 진입점.
+//! Dock UI 진입점.
 
 mod app;
 mod apps;

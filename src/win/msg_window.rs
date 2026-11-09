@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn mouse_leave_during_busy_handler_is_not_lost() {
         let leaves = Rc::new(Cell::new(0));
-        let hwnd = create("YTLauncherTestReentrantLeave", Box::new(Reentrant { leaves: leaves.clone() })).unwrap();
+        let hwnd = create("DockUITestReentrantLeave", Box::new(Reentrant { leaves: leaves.clone() })).unwrap();
         unsafe { SendMessageW(hwnd, WM_APP, None, None) };
         // 미뤄 둔 메시지를 처리한다
         let mut msg = MSG::default();
@@ -235,7 +235,7 @@ mod tests {
         let drops = Rc::new(Cell::new(0));
         let handled = Rc::new(Cell::new(0));
         let handler = SelfDestroying { drops: drops.clone(), handled: handled.clone() };
-        let hwnd = create("YTLauncherTestSelfDestroy", Box::new(handler)).unwrap();
+        let hwnd = create("DockUITestSelfDestroy", Box::new(handler)).unwrap();
         unsafe { PostMessageW(Some(hwnd), WM_APP + 50, WPARAM(0), LPARAM(0)).unwrap() };
         pump();
         assert_eq!(handled.get(), 1);
@@ -267,13 +267,11 @@ mod tests {
     #[test]
     fn display_change_and_registered_messages_during_busy_handler_are_not_lost() {
         let registered = unsafe {
-            windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(windows::core::w!(
-                "YTLauncherTestRegistered"
-            ))
+            windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(windows::core::w!("DockUITestRegistered"))
         };
         let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
         let handler = BusyRecorder { nested: vec![WM_DISPLAYCHANGE, registered], seen: seen.clone() };
-        let hwnd = create("YTLauncherTestBusyRecorder", Box::new(handler)).unwrap();
+        let hwnd = create("DockUITestBusyRecorder", Box::new(handler)).unwrap();
         unsafe { SendMessageW(hwnd, WM_APP, None, None) };
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, Some(hwnd), 0, 0, PM_REMOVE) }.as_bool() {

@@ -79,8 +79,8 @@ const MAX_FRAME_DT: f32 = 50.0;
 const SAVE_DELAY_MS: u32 = 500;
 const DRAG_THRESHOLD: f32 = 6.0;
 const FADE_MS: f32 = 200.0;
-const GLASS_CLASS: &str = "YTLauncherGlass";
-const CONTENT_CLASS: &str = "YTLauncherContent";
+const GLASS_CLASS: &str = "DockUIGlass";
+const CONTENT_CLASS: &str = "DockUIContent";
 const CMD_EDIT: u32 = 1;
 const CMD_DELETE: u32 = 2;
 

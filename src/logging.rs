@@ -1,4 +1,4 @@
-//! `%APPDATA%\YT-Launcher\logs\launcher.log` 파일 로그. 1MB가 넘으면 `.1`~`.3`으로 돌린다.
+//! `%APPDATA%\DockUI\logs\launcher.log` 파일 로그. 1MB가 넘으면 `.1`~`.3`으로 돌린다.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;

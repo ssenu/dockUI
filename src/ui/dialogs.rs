@@ -36,7 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::HSTRING;
 
-const DIALOG_CLASS: &str = "YTLauncherDialog";
+const DIALOG_CLASS: &str = "DockUIDialog";
 /// 정적 글자가 넘치면 … 으로 줄인다 (SystemServices 기능을 켜지 않으려고 값만 둔다)
 const SS_ENDELLIPSIS: u32 = 0x4000;
 /// EDIT 빈 칸 안내 글자 (Common Controls 6)
@@ -847,7 +847,7 @@ mod tests {
         let _ = unsafe {
             windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
         };
-        let owner = create("YTLauncherTestDialogPreview", Box::new(Owner)).unwrap();
+        let owner = create("DockUITestDialogPreview", Box::new(Owner)).unwrap();
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(500));
             if let Ok(h) = unsafe { FindWindowW(&HSTRING::from(DIALOG_CLASS), None) } {
@@ -876,7 +876,7 @@ mod tests {
     #[test]
     fn save_returns_trimmed_input_and_cancel_returns_none() {
         let _guard = lock();
-        let owner = create("YTLauncherTestDialogOwner", Box::new(Owner)).unwrap();
+        let owner = create("DockUITestDialogOwner", Box::new(Owner)).unwrap();
         press_later(&[IDOK.0]);
         let initial = edit(ItemInput::Youtube { query: "  로파이 음악 ".into(), name: " 공부 ".into() });
         let saved = item_dialog(owner, "항목 수정", &initial);
@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn web_address_is_normalized_and_app_edit_keeps_choice() {
         let _guard = lock();
-        let owner = create("YTLauncherTestDialogOwner2", Box::new(Owner)).unwrap();
+        let owner = create("DockUITestDialogOwner2", Box::new(Owner)).unwrap();
         press_later(&[IDOK.0]);
         let web = edit(ItemInput::Web { url: " naver.com ".into(), name: "".into() });
         assert_eq!(
@@ -907,7 +907,7 @@ mod tests {
     #[test]
     fn dialog_ends_when_owner_window_is_destroyed() {
         let _guard = lock();
-        let owner = create("YTLauncherTestDialogOwner4", Box::new(Owner)).unwrap();
+        let owner = create("DockUITestDialogOwner4", Box::new(Owner)).unwrap();
         let owner_raw = owner.0 as isize;
         std::thread::spawn(move || {
             for _ in 0..100 {
@@ -928,7 +928,7 @@ mod tests {
     #[test]
     fn switching_kind_keeps_typed_text_per_kind() {
         let _guard = lock();
-        let owner = create("YTLauncherTestDialogOwner3", Box::new(Owner)).unwrap();
+        let owner = create("DockUITestDialogOwner3", Box::new(Owner)).unwrap();
         // 새 항목: 유튜브 칸(비어 있음) → 웹으로 바꿔도 빈 주소라 저장 안 됨 → 취소
         press_later(&[ID_KIND_WEB, IDCANCEL.0]);
         assert_eq!(item_dialog(owner, "항목 추가", &Initial::New), None);

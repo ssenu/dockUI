@@ -61,7 +61,7 @@ pub fn delete_value(root: HKEY, subkey: &str, value: &str) {
 mod tests {
     use super::*;
 
-    const KEY: &str = r"Software\YT-Launcher-Test";
+    const KEY: &str = r"Software\DockUI-Test";
 
     #[test]
     fn string_roundtrip_in_hkcu() {
