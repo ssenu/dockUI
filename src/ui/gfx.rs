@@ -378,9 +378,15 @@ impl Gfx {
 
     /// 위→아래 그라데이션으로 채운 둥근 사각형
     pub fn fill_round_rect_gradient(&self, r: RectF, radius: f32, top: Color, bottom: Color) {
+        let (start, end) = (Pt { x: r.x, y: r.y }, Pt { x: r.x, y: r.y + r.h });
+        self.fill_round_rect_linear(r, radius, start, end, top, bottom);
+    }
+
+    /// `start`(색 `from`)에서 `end`(색 `to`)로 가는 직선 그라데이션으로 채운 둥근 사각형
+    pub fn fill_round_rect_linear(&self, r: RectF, radius: f32, start: Pt, end: Pt, from: Color, to: Color) {
         let stops = [
-            D2D1_GRADIENT_STOP { position: 0.0, color: color(top) },
-            D2D1_GRADIENT_STOP { position: 1.0, color: color(bottom) },
+            D2D1_GRADIENT_STOP { position: 0.0, color: color(from) },
+            D2D1_GRADIENT_STOP { position: 1.0, color: color(to) },
         ];
         // SAFETY: 지역 배열로 그라데이션 정지점을 만든다
         unsafe {
@@ -388,10 +394,7 @@ impl Gfx {
             let Ok(collection) = rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else {
                 return;
             };
-            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                startPoint: Vector2 { X: r.x, Y: r.y },
-                endPoint: Vector2 { X: r.x, Y: r.y + r.h },
-            };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: point(start), endPoint: point(end) };
             let brush_props = D2D1_BRUSH_PROPERTIES { opacity: 1.0, transform: Matrix3x2::identity() };
             if let Ok(brush) = self.ctx.CreateLinearGradientBrush(&props, Some(&brush_props), &collection) {
                 let rr = D2D1_ROUNDED_RECT { rect: rect(r), radiusX: radius, radiusY: radius };
